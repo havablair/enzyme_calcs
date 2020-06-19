@@ -1,0 +1,362 @@
+---
+title: "MG Ammonium Plate Script "
+author: "Hava Blair"
+date: "`r format(Sys.time(), '%d %b, %Y')`"
+output: html_document
+---
+
+## Processing 96-well Plates from Ammonium Colorimetric Assay 
+
+The core of this script was shared with Hava Blair by Miriam Gieske in March, 2020.  It was written to process data from colorimetric ammonium assays performed in 96-well plates utilizing the R package plater (and others) to facilitate data upload and tidying. 
+
+Hava put it in Rmd format on March 26, 2020 and started to make modifications to fit her workflow for processing ammonium and nitrate plates run for the CIG Soil Health Research Project. 
+
+
+```{r, packages, message = FALSE, warning=FALSE}
+## LOAD PACKAGES 
+library(plyr)
+library(tidyverse)
+library(plater)
+library(rio)
+```
+
+## Read in data 
+
+You need one completed template file (find template HERE XXXXXXX) for each plate, in CSV format.
+
+Files used with this version of the script should contain all the metadata in the xlsx file itself, in 5 blocks:
+
+  --"Template" = sample and standard IDs.  Empty wells (no sample, standard, or check) may be coded as ".", "0" (zero), "NA", or left blank.
+  
+  --"Data" = raw absorbance data from the plate reader
+  
+  --"Bad_wells" = identifies any wells that have known problems (ex. pipetting errors)
+  
+  --"Dilution" has the dilution factor for each sample
+  
+  --"Batch" may be used to group samples or associate samples with controls, or to identify which samples are "redos" and "originals" for comparison.
+  
+  --"Reason" provides more information for any wells marked as "bad" above.  Examples are:  pipette error, exceeds absorbance threshold (set by std curve), etc. 
+
+The files you want to process must all be in a single folder, and that folder must not contain any other files R will attempt to read in all files in the designated folder.
+
+Now you are ready to read in your files. If you get an error, check whether you have any extra CSV files in the designated folder. 
+
+Where/how is the plate column created?  Does plater do this automatically when you use the read.plates() function?   YES -- this appears to be how it works
+
+Not sure that the "reason" chunk of the template is really necessary - all the data marked "bad" by the user gets pulled out early on. 
+
+```{r, filenames}
+
+file.names <- dir("./plater-amm/")
+file.paths<- paste0("./plater-amm/", file.names)
+plates <- read_plates(file.paths)
+names(plates) <- c("Plate", "Wells", "ID", "abs", "Bad_wells", "Dilution", "Batch", "Reason")
+head(plates)
+unique(plates$Plate) # To check that all plates read in correctly
+```
+##Remove empty wells and known bad wells 
+
+```{r, badwells}
+# Remove empty wells  
+plates <- subset(plates, !is.na(ID) & ID != 0 & ID !=".")
+
+# Remove bad wells and keep good ones
+plates <- subset(plates, Bad_wells != "bad" & Bad_wells != "Bad" 
+                 & Bad_wells != "x" & Bad_wells != "X" | is.na(Bad_wells))
+
+head(plates)
+
+```
+
+##Mean absorbance for each sample and standard
+
+```{r, mean abs}
+mean.abs<-group_by(plates, Plate, ID)%>%
+  summarise(abs = mean(abs, na.rm = T), dil=mean(as.numeric(Dilution)))
+
+```
+
+##Quality Control 
+
+```{r, tech reps}
+# Count number of technical replicates for each sample (after bad wells are removed)
+good.ct <- group_by(plates, Plate, ID, Batch) %>%
+  summarise(good = sum(!is.na(abs)))
+
+head(good.ct)
+
+```
+## Coefficient of variation
+is standard deviation divided by mean, expressed as a percent. Set the maximum acceptable CV for technical replicates of the same sample.  Samples with a CV above this threshold will be removed from your dataset.
+
+Ex. 10 = remove samples with a CV greater than 10%
+
+```{r, cv}
+
+cv_max<- 10
+
+# Calculate CV for each sample
+
+cv.dat <- group_by(plates, Plate, ID) %>%
+  summarise(sample.cv = sd(abs, na.rm = TRUE)/mean(abs, na.rm = TRUE)*100)
+```
+
+# Plate CV distributions 
+
+Look at the distribution of CVs for each plate.  You can use this information to adjust your CV threshold, if desired. 
+
+```{r, cv-hist}
+dlply(cv.dat, .(Plate), function(dat) 
+  hist(dat$sample.cv, main = unique(dat$Plate), xlab = "CV"))
+```
+##Merge quality control info with mean absorbance dataset 
+
+```{r, merge qc-abs}
+mean.abs <- merge(mean.abs, good.ct, by = c("Plate", "ID"))
+mean.abs <- merge(mean.abs, cv.dat, by = c("Plate", "ID"))
+head(mean.abs)
+```
+
+##Add 2 columns to track QC data 
+
+```{r, trackQC}
+mean.abs$keep <- "yes"   # Good data: yes, keep it.  Bad data: no, remove it.
+mean.abs$reason <- NA    # Fill in for bad data.
+
+head(mean.abs)
+
+```
+##Check CV and number good replicates -- populate reason column
+
+```{r, CV-checks}
+# Check CV and flag samples that are over the threshold you set above
+mean.abs$keep <- ifelse(mean.abs$sample.cv > cv_max, "no", mean.abs$keep)
+mean.abs$reason <- ifelse(mean.abs$sample.cv > cv_max, "High CV", mean.abs$reason)
+
+# Check number of good replicates and flag samples with less than 2
+mean.abs$keep <- ifelse(mean.abs$good < 2, "no", mean.abs$keep)
+mean.abs$reason <- ifelse(mean.abs$good < 2, "Pipetting errors", mean.abs$reason)
+
+# Show the bad samples
+bad.samples<-mean.abs[mean.abs$keep=="no", ]
+head(bad.samples)
+
+```
+
+## MAKE STANDARD CURVES
+
+```{r, id-stds}
+# Set the shared pattern of letters that identifies your standards
+std_key <- "std"
+
+# Get the absorbance of the standards
+stds.abs <- mean.abs[grepl(std_key, mean.abs$ID, fixed=TRUE)==TRUE 
+                     & mean.abs$keep=="yes", ]
+
+# Get the concentrations from the standard names
+stds.abs$conc <- as.numeric(str_replace(stds.abs$ID, "ppm-std", ""))
+
+is.na(stds.abs$conc)    # check whether all of your #standard concentrations were extracted correctly (false is good!)
+
+```
+#Clean standard data
+```{r, std-qc}
+# Remove standards that don't have a concentration value
+stds.abs <- subset(stds.abs, !is.na(stds.abs$conc))
+
+# Remove standards with conc. > 6 ppm
+# Linear range only goes up to about 6 ppm
+stds.abs <- stds.abs[stds.abs$conc < 8, ]
+
+# Split into a list with one dataframe for each plate
+stds.list <- split(stds.abs, stds.abs$Plate)
+
+```
+#Set up details for the standard curves
+
+
+
+```{r, std-functions}
+# Function to get equation and R-sq for a model
+lm_eqn <- function(m) {
+  l <- list(intcpt = format(abs(coef(m)[1]), digits = 3, scientific=FALSE),
+            slope = format(coef(m)[2], digits = 3, scientific=FALSE),
+            rsq = format(summary(m)["r.squared"], digits = 3));
+  if (coef(m)[1] >= 0)  {
+    eq <- paste("y = ", l["slope"], "x + ", l["intcpt"], ", R^2 = ", l["rsq"], sep = "")
+  } else {
+    eq <- paste("y = ", l["slope"], "x - ", l["intcpt"], ", R^2 = ", l["rsq"], sep = "")    
+  }
+}
+
+# Function to plot a standard curve with equation and R-sq
+plot.curve <- function(data, model) {
+  plot(abs ~ conc, data, main = unique(data$Plate)) +
+  abline(model) +
+  mtext(lm_eqn(model), side = 3)
+}
+
+# Set up matrix to record coefficients and max conc for each plate's standard curve
+coeff <- matrix(data = NA, ncol = 4, nrow = length(stds.list))
+colnames(coeff)=c("Plate", "intcpt", "slope", "max.abs")
+
+# Set up a matrix to record notes for each plate
+curve.notes <- matrix(data = NA, ncol = 2, nrow = length(stds.list))
+colnames(curve.notes)=c("Plate", "notes")
+
+# Set the minimum number of standards for a curve
+# The absolute minimum to plot a straight line is 3
+# We normally use 5-6 standards
+min_stds <- 4
+
+```
+
+#Standard curve loop 
+
+1. Omits plates with fewer than the minimum number of standards passing QC checks
+2. Plots standard curves with equation and R-sq for each remaining plate
+3. Returns coefficients for plates with R-sq > 0.99
+4. Prints outcome for each plate to the console
+
+```{r, std-loop}
+for(i in 1:length(stds.list)) {
+  # Check number of standards
+  if(length(stds.list[[i]]$ID) < min_stds) {
+    # Record the plate name
+    coeff[i, "Plate"] <- names(stds.list)[i]
+    # Feedback
+    curve.notes[i, ] <- c(names(stds.list[i]), "Need to redo plate (not enough good standards)")
+  } else {
+    # Calculate curve
+    m1 <- lm(abs ~ conc, stds.list[[i]])
+    rsq1 <- summary(m1)["r.squared"] 
+    # Plot the standard curve
+    plot.curve(stds.list[[i]], m1)
+    if (rsq1 >= 0.98) {
+      # Save the coefficients
+      coeff[i, "Plate"] <- names(stds.list)[i]
+      coeff[i, 2:3] <- coef(m1)
+      coeff[i, 4] <- max(stds.list[[i]]$abs)
+      # Feedback
+      curve.notes[i, ] <- c(names(stds.list[i]), "Standard curve looks good!")
+    } else {
+        # Record the plate name
+        coeff[i, "Plate"] <- names(stds.list)[i]
+        # Feedback
+        curve.notes[i, ] <- c(names(stds.list[i]), "Need to redo plate (bad standard curve)")
+      }
+      # Clean up
+    rm(m1)
+    rm(rsq1)
+  }
+}
+
+print(curve.notes)
+```
+##ADD INFO TO THE SAMPLE DATASET 
+
+```{r, data-merge}
+# Remove standards from absorbance dataset
+samples <- mean.abs[grepl(std_key, mean.abs$ID, fixed=TRUE)==FALSE, ]
+
+# Add coefficients and max conc for standard curves
+coeff <- data.frame(coeff, stringsAsFactors = FALSE)
+samples <- merge(samples, coeff, by = "Plate")
+samples$intcpt <- as.numeric(samples$intcpt)
+samples$slope <- as.numeric(samples$slope)
+samples$max.abs <- as.numeric(samples$max.abs)
+
+# Flag data from plates with bad standard curves
+samples$keep <- ifelse(is.na(samples$intcpt), "no", samples$keep)
+samples$reason <- ifelse(is.na(samples$intcpt), "Bad standard curve", samples$reason)
+
+# If the absorbance of a sample is greater than the absorbance
+#   of the highest concentration standard, flag the data
+samples$keep <- ifelse(!is.na(samples$max.abs) & samples$abs > samples$max.abs,"no", samples$keep)
+
+samples$reason <- ifelse(!is.na(samples$max.abs) & samples$abs > samples$max.abs, "Outside linear range", samples$reason)
+
+head(samples)
+```
+##LOOK AT THE ABSORBANCE OF YOUR CHECKS 
+
+How does the absorbance of the soil-less checks (blanks from the PMN / CFE round) compare to the absorbance of the 0ppm standards?  
+
+```{r, conrol-check}
+# Extract the 0 ppm standards
+zero.stds <- stds.abs[stds.abs$conc == 0 & stds.abs$keep == "yes"
+                      & grepl("orig", stds.abs$Plate, fixed=TRUE)==FALSE,
+                      c("ID", "abs", "keep", "reason")]
+zero.stds
+zero.stds$type <- "0ppm_std"
+
+# Set the shared pattern of letters that allows you to identify checks
+check_key <- "control"
+# Extract checks from dataset
+checks <- samples[grepl(check_key, samples$Batch , fixed=TRUE)==TRUE 
+                  & grepl("orig", samples$Plate, fixed=TRUE)==FALSE
+                  & samples$keep == "yes", 
+                  c("ID", "abs", "keep", "reason")]
+checks
+checks$type <- "soil-less_check"
+```
+
+#Blanks vs. 0ppm std histograms
+
+If your checks are clean, the absorbance distribution for the checks should look
+similar to the absorbance distribution for the 0ppm standards.
+
+If you have checks with high absorbance, take a look at them to see which ones are high.  High absorbance values for checks suggest contamination.  You should carefully evaluate whether the data you collected along with those checks is usable.
+
+```{r, control-hist}
+# Make histograms
+# If your checks are clean, the absorbance distribution for the checks should look
+#   similar to the absorbance distribution for the 0ppm standards.
+stds.checks <- rbind(zero.stds, checks)
+ggplot(stds.checks, aes(abs, fill = type)) + 
+  geom_histogram(alpha = 0.5, position = 'identity', binwidth = 0.001) +
+  theme_classic() +
+  ggtitle("Ammonium 2019")
+```
+
+#CALCULATE AMMONIUM (OR NITRATE OR OTHER) CONCENTRATION OF SAMPLES
+
+For POX-C, this will be the conc. of permanganate remaining unreduced after the reaction.
+
+Note: in the equation for the standard curve, 
+x = conc 
+y = abs 
+abs = slope*conc + intcpt
+
+We have abs and need to solve for conc: 
+
+conc = (abs - intcpt)/slope
+
+We also need to take into account the dilution factor
+
+```{r, calc-conc}
+
+
+samples$conc <- with(samples, ((abs - intcpt)/slope)*dil)
+
+head(samples)
+
+```
+
+
+##SAVE THE RESULTS 
+
+
+```{r, save-data!}
+# Save the good data
+good.samples <- subset(samples, keep=="yes"
+                       & grepl("orig", samples$Plate, fixed=TRUE)==FALSE)
+write.csv(good.samples, "./plater-output/20200330_amm_calcs_good_samples.csv", row.names = FALSE)
+
+# Save the samples that need to be redone
+bad.samples <- subset(samples, keep=="no" 
+                      & grepl("orig", samples$Plate, fixed=TRUE)==FALSE)
+write.csv(bad.samples, "./plater-output/20200330_amm_calcs_bad_samples.csv", row.names = FALSE)
+```
+

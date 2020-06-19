@@ -1,0 +1,226 @@
+---
+title: "Hydrolytic Extracellular Enzyme Pre-test Calculations"
+author: "Hava Blair"
+date: "June 18, 2020"
+output: html_document
+---
+## Enzyme Pre-test Calculations 
+
+```{r, packages, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+## Load Packages 
+library(tidyverse)
+library(plater)
+library(glue)
+
+```
+
+## Read in plate templates
+
+You need one completed template file (find template HERE XXXXXXX) for each plate, in CSV format. 
+
+Name your file with the ID of your plate.  This will be added as its own column by plater so that you can identify which plate the data is coming from. 
+
+Files used with this version of the script should contain all the metadata in the csv file itself, in 4 blocks:
+
+  --"template" = standard, blank, and sample IDs.  Empty wells (no sample, standard, or check) may be coded as ".", "0" (zero), "NA", or left blank.
+  
+  --"Data" = raw fluorescence data from the plate reader
+  
+  --"bad_wells" = identifies any wells that have known problems (ex. pipetting errors).  May be coded as "bad", "Bad", "x", or "X".  Anything with NA (blank) will be kept as "good"
+  
+  --"ph_batch" has the pH of the buffer you used for this plate
+  
+The files you want to process must all be in a single folder, and that folder must not contain any other files R will attempt to read in all files in the designated folder.
+
+Now you are ready to read in your files. If you get an error, check whether you have any extra CSV files in the designated folder.
+
+```{r files}
+file.names <- dir("./plater-templates/")
+file.paths<- paste0("./plater-templates/", file.names)
+plates <- read_plates(file.paths)
+colnames(plates) <- c("plate", "wells", "id", "fluor", "bad_wells", "ph_batch")
+head(plates)
+unique(plates$plate) # To check that all plates read in correctly
+nrow(plates)
+```
+
+## Remove empty wells and known bad wells
+
+You can also embed plots, for example:
+
+```{r, badwells}
+#Remove empty wells
+no_missing <- subset(plates, !is.na(id) & id != 0 & id != ".")
+
+# Remove bad wells and keep good ones
+no_bad <- subset(no_missing, is.na(bad_wells))
+
+#original PMN script has the code below to remove bad wells. Based on the way I have been filling out my templates, I think it can be sipmlified to subsetting based on "is.na(bad_wells)"
+# plates <- subset(plates, Bad_wells != "bad" & Bad_wells != "Bad" 
+#                  & Bad_wells != "x" & Bad_wells != "X" | is.na(Bad_wells))
+
+wells_removed <- nrow(plates) - nrow(no_bad)
+
+glue("Removed {wells_removed} wells that were missing or bad")
+
+clean_data <- no_bad
+```
+
+## Extinction coefficient determination
+
+```{r}
+#Obtain the plate blank value by averaging the values in column 12 (id = Buf) of each plate
+
+plate_blanks <- clean_data %>% 
+  select(plate, wells, id, fluor, ph_batch) %>% 
+  filter(id == "Buf") %>% 
+  group_by(plate) %>% 
+  summarise(plate_blnk_mean = mean(fluor), n = n())
+
+# Average the MUB standard values (column 10) for each MUB concentration
+mub_stds <- clean_data %>% 
+  select(plate, wells, id, fluor, ph_batch) %>% 
+  filter(str_detect(wells, "10")) %>% 
+  group_by(plate, id) %>% 
+  summarise(mub_std_mean = mean(fluor), n = n())
+
+#Create a column for the plate blank values by joining the plate_blanks and mub_stds tbls
+join_std_blnk <- left_join(plate_blanks, mub_stds, by = "plate")
+
+#Subtract the plate blank from the fluorescence values for each averaged concentration
+ext_coeff_tbl <- join_std_blnk %>% 
+  select(-n.x, -n.y) %>% 
+  mutate(corr_mub_std_mean = mub_std_mean - plate_blnk_mean, mub_conc_uM = as.numeric(str_replace(join_std_blnk$id, "MUB", "")))
+
+stds_list <- split(ext_coeff_tbl, ext_coeff_tbl$plate)
+
+
+```
+
+
+## Set up standard curves 
+```{r}
+# Function to get equation and R-sq for a model
+lm_eqn <- function(m) {
+  l <- list(intcpt = format(abs(coef(m)[1]), digits = 3, scientific=FALSE),
+            slope = format(coef(m)[2], digits = 3, scientific=FALSE),
+            rsq = format(summary(m)["r.squared"], digits = 3));
+  if (coef(m)[1] >= 0)  {
+    eq <- paste("y = ", l["slope"], "x + ", l["intcpt"], ", R^2 = ", l["rsq"], sep = "")
+  } else {
+    eq <- paste("y = ", l["slope"], "x - ", l["intcpt"], ", R^2 = ", l["rsq"], sep = "")    
+  }
+}
+
+# Function to plot a standard curve with equation and R-sq
+plot.curve <- function(data, model) {
+  plot(corr_mub_std_mean ~ mub_conc_uM, data, main = unique(data$plate)) +
+  abline(model) +
+  mtext(lm_eqn(model), side = 3)
+}
+
+# Set up matrix to record coefficients and max conc for each plate's standard curve
+coeff <- matrix(data = NA, ncol = 4, nrow = length(stds_list))
+colnames(coeff)=c("plate", "intcpt", "slope", "max.fluor")
+
+# Set up a matrix to record notes for each plate
+curve.notes <- matrix(data = NA, ncol = 2, nrow = length(stds_list))
+colnames(curve.notes)=c("plate", "notes")
+
+# Set the minimum number of standards for a curve
+# The absolute minimum to plot a straight line is 3
+# We normally use 5-6 standards
+min_stds <- 4
+```
+
+#Plot standard curves 
+
+1. Omits plates with fewer than the minimum number of standards passing QC checks
+2. Plots standard curves with equation and R-sq for each remaining plate
+3. Returns coefficients for plates with R-sq > 0.99
+4. Prints outcome for each plate to the console
+
+```{r}
+for(i in 1:length(stds_list)) {
+  # Check number of standards
+  if(length(stds_list[[i]]$id) < min_stds) {
+    # Record the plate name
+    coeff[i, "plate"] <- names(stds_list)[i]
+    # Feedback
+    curve.notes[i, ] <- c(names(stds_list[i]), "Need to redo plate (not enough good standards)")
+  } else {
+    # Calculate curve
+    m1 <- lm(corr_mub_std_mean ~ mub_conc_uM, stds_list[[i]])
+    rsq1 <- summary(m1)["r.squared"] 
+    # Plot the standard curve
+    plot.curve(stds_list[[i]], m1)
+    if (rsq1 >= 0.98) {
+      # Save the coefficients
+      coeff[i, "plate"] <- names(stds_list)[i]
+      coeff[i, 2:3] <- coef(m1)
+      coeff[i, 4] <- max(stds_list[[i]]$corr_mub_std_mean)
+      # Feedback
+      curve.notes[i, ] <- c(names(stds_list[i]), "Standard curve looks good!")
+    } else {
+        # Record the plate name
+        coeff[i, "plate"] <- names(stds_list)[i]
+        # Feedback
+        curve.notes[i, ] <- c(names(stds_list[i]), "Need to redo plate (bad standard curve)")
+      }
+      # Clean up
+    rm(m1)
+    rm(rsq1)
+  }
+}
+
+print(curve.notes)
+
+#Save a dataframe with the results of the linear models (slope, intercept, maximum fluorescence)
+
+coeff <-  data.frame(coeff)
+
+
+```
+### Calculate extinction coefficient
+The extinction coefficient is the slope (m) from the standard curves you made above, divided by the assay volume 
+
+Pay attention to units! 
+**slope (m) units** from the standard curves = fluor/uM = fluor/ (umol/L) = fluor L / umol = fluor mL / nmol
+
+**assay volume** is 250uL = 0.00025 L = 0.250 mL 
+
+The protocol states: "Make sure this is calculated with the MUB concentrations in nmol/mL, which is equivalent to umol/L."" 
+
+```{r}
+assay
+```
+
+
+### Add linear model data to sample dataset 
+
+```{r}
+# Remove standards from absorbance dataset
+samples <- mean.abs[grepl(std_key, mean.abs$ID, fixed=TRUE)==FALSE, ]
+
+# Add coefficients and max conc for standard curves
+coeff <- data.frame(coeff, stringsAsFactors = FALSE)
+samples <- merge(samples, coeff, by = "Plate")
+samples$intcpt <- as.numeric(samples$intcpt)
+samples$slope <- as.numeric(samples$slope)
+samples$max.abs <- as.numeric(samples$max.abs)
+
+# Flag data from plates with bad standard curves
+samples$keep <- ifelse(is.na(samples$intcpt), "no", samples$keep)
+samples$reason <- ifelse(is.na(samples$intcpt), "Bad standard curve", samples$reason)
+
+# If the absorbance of a sample is greater than the absorbance
+#   of the highest concentration standard, flag the data
+samples$keep <- ifelse(!is.na(samples$max.abs) & samples$abs > samples$max.abs,"no", samples$keep)
+
+samples$reason <- ifelse(!is.na(samples$max.abs) & samples$abs > samples$max.abs, "Outside linear range", samples$reason)
+
+head(samples)
+```
+

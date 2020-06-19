@@ -1,0 +1,5 @@
+"0","file.names <- dir(""./plater-templates/"")"
+"0","file.paths<- paste0(""./plater-templates/"", file.names)"
+"0","plates <- read_plates(file.paths)"
+"0","colnames(plates) <- c(""plate"", ""wells"", ""id"", ""fluor"", ""bad_wells"", ""ph_batch"")"
+"0","head(plates)"
