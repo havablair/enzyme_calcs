@@ -16,7 +16,8 @@ library(glue)
 
 ```
 
-# Need to change mentions of "extinction" to "emission"
+# Need to change mentions of "extinction" to "emission" ???  
+# Think about setting warnings for when # of standards is <4, and for when assay fluor exceeds max std fluor.
 
 ## Read in plate templates
 
@@ -95,8 +96,7 @@ ext_coeff_tbl <- join_std_blnk %>%
   select(-n.x, -n.y) %>% 
   mutate(corr_std_mean = mub_std_mean - plate_blnk_mean, mub_conc_uM = as.numeric(str_replace(join_std_blnk$id, "MUB", "")))
 
-stds_list <- split(ext_coeff_tbl, ext_coeff_tbl$plate)
-
+ext_coeff_tbl
 
 ```
 ### Quench controls
@@ -130,16 +130,10 @@ quench_tbl <- join_soil_std_blnk %>%
 quench_tbl$mub_conc_uM <- str_replace(quench_tbl$mub_conc_uM, "\\+", "")
 quench_tbl$mub_conc_uM <- as.numeric(str_replace(quench_tbl$mub_conc_uM, "S", ""))
 
-#quench_stds_list <- split(quench_tbl, quench_tbl$plate)
-
-full_stds_list <- c(stds_list, quench_stds_list)
-
-
 ```
 
 ## Combine the emission and quench coefficient tables 
-quench_tbl
-ext_coeff_tbl
+
 
 ```{r}
 quench_select <- quench_tbl %>% 
@@ -171,110 +165,64 @@ slope_fun <- function(mod){
   coefficients(mod)[[2]]
 }
 
+r_sq_fun <- function(mod){
+  summary(mod)[["r.squared"]]
+}
+
+max_fluor_fun <- function(data){
+  max(data$corr_std_mean)
+}
+
 stds_coeffs <- m_stds_list %>% 
-  transmute(intcpt = map_dbl(model, b_fun), m_slope = map_dbl(model, slope_fun))
+  transmute(intcpt = map_dbl(model, b_fun), m_slope = map_dbl(model, slope_fun), r_squared = map_dbl(model, r_sq_fun), max_fluor = map_dbl(data, max_fluor_fun))
 
 stds_coeffs
 
-coeffs_wide <- pivot_wider(stds_coeffs, names_from = id, values_from = c(intcpt, m_slope))
+```
 
+# Plot emission curves
+```{r, emission-curves}
+emission_only <- subset(stds_coeffs, id == "emission")
+
+ext_coeff_tbl %>% 
+  ggplot(aes(x = mub_conc_uM, y = corr_std_mean, color = plate)) + 
+  geom_point() + 
+  geom_abline(data = emission_only, aes(slope = m_slope, intercept = intcpt, color = plate)) +
+  geom_text(data = emission_only, aes(x = 1.5, y = 8000,
+                          label = paste("R^2=", round(r_squared, digits = 3))), inherit.aes = FALSE) + 
+  geom_text(data = emission_only, aes(x = 1.0, y = 10000,
+                                    label = paste(" y= ", round(m_slope, digits = 2),
+                                      "x", " + ", round(intcpt, digits = 2))), inherit.aes = FALSE) + 
+  facet_wrap(vars(plate)) + 
+  
+labs(title = "Emission standard curves")
+```
+
+
+# Plot quench curves
+```{r, quench-curves}
+quench_only <- subset(stds_coeffs, id == "quench")
+
+quench_tbl %>% 
+  ggplot(aes(x = mub_conc_uM, y = corr_std_mean, color = plate)) + 
+  geom_point() + 
+  geom_abline(data = quench_only, aes(slope = m_slope, intercept = intcpt, color = plate)) +
+  geom_text(data = quench_only, aes(x = 1.5, y = 2000,
+                          label = paste("R^2=", round(r_squared, digits = 3))), inherit.aes = FALSE) + 
+  geom_text(data = quench_only, aes(x = 1.0, y = 2500,
+                                    label = paste(" y= ", round(m_slope, digits = 2),
+                                      "x", " + ", round(intcpt, digits = 2))), inherit.aes = FALSE) + 
+  facet_wrap(vars(plate)) + 
+  
+labs(title = "Quench standard curves")
+                                        
 
 ```
 
 
+### Calculate extinction coefficient
 
-## Set up standard curves 
-```{r}
-# Function to get equation and R-sq for a model
-lm_eqn <- function(m) {
-  l <- list(intcpt = format(abs(coef(m)[1]), digits = 3, scientific=FALSE),
-            slope = format(coef(m)[2], digits = 3, scientific=FALSE),
-            rsq = format(summary(m)["r.squared"], digits = 3));
-  if (coef(m)[1] >= 0)  {
-    eq <- paste("y = ", l["slope"], "x + ", l["intcpt"], ", R^2 = ", l["rsq"], sep = "")
-  } else {
-    eq <- paste("y = ", l["slope"], "x - ", l["intcpt"], ", R^2 = ", l["rsq"], sep = "")    
-  }
-}
-
-# Function to plot a standard curve with equation and R-sq
-plot.curve <- function(data, model) {
-  plot(corr_std_mean ~ mub_conc_uM, data, main = unique(data$plate)) +
-  abline(model) +
-  mtext(lm_eqn(model), side = 3)
-}
-
-# Set up matrix to record coefficients and max conc for each plate's standard curve
-coeff <- matrix(data = NA, ncol = 4, nrow = length(stds_list))
-colnames(coeff)=c("plate", "intcpt", "slope", "max.fluor")
-
-# Set up a matrix to record notes for each plate
-curve.notes <- matrix(data = NA, ncol = 2, nrow = length(stds_list))
-colnames(curve.notes)=c("plate", "notes")
-
-# Set the minimum number of standards for a curve
-# The absolute minimum to plot a straight line is 3
-# We normally use 5-6 standards
-min_stds <- 4
-```
-
-#Plot standard curves 
-
-1. Omits plates with fewer than the minimum number of standards passing QC checks
-2. Plots standard curves with equation and R-sq for each remaining plate
-3. Returns coefficients for plates with R-sq > 0.99
-4. Prints outcome for each plate to the console
-
-```{r}
-for(i in 1:length(stds_list)) {
-  # Check number of standards
-  if(length(stds_list[[i]]$id) < min_stds) {
-    # Record the plate name
-    coeff[i, "plate"] <- names(stds_list)[i]
-    # Feedback
-    curve.notes[i, ] <- c(names(stds_list[i]), "Need to redo plate (not enough good standards)")
-  } else {
-    # Calculate curve
-    m1 <- lm(corr_std_mean ~ mub_conc_uM, stds_list[[i]])
-    rsq1 <- summary(m1)["r.squared"] 
-    # Plot the standard curve
-    plot.curve(stds_list[[i]], m1)
-    if (rsq1 >= 0.98) {
-      # Save the coefficients
-      coeff[i, "plate"] <- names(stds_list)[i]
-      coeff[i, 2:3] <- coef(m1)
-      coeff[i, 4] <- max(stds_list[[i]]$corr_std_mean)
-      # Feedback
-      curve.notes[i, ] <- c(names(stds_list[i]), "Standard curve looks good!")
-    } else {
-        # Record the plate name
-        coeff[i, "plate"] <- names(stds_list)[i]
-        # Feedback
-        curve.notes[i, ] <- c(names(stds_list[i]), "Need to redo plate (bad standard curve)")
-      }
-      # Clean up
-    rm(m1)
-    rm(rsq1)
-  }
-}
-
-print(curve.notes)
-
-#Save a dataframe with the results of the linear models (slope, intercept, maximum fluorescence)
-
-coeff <-  data.frame(coeff)
-
-coeff <- coeff %>% 
-  mutate(intcpt = as.numeric(intcpt),
-         slope = as.numeric(slope),
-         max.fluor = as.numeric(max.fluor))
-coeff
-
-```
-
-### Calculate emission coefficient
-
-The extinction coefficient is the slope (m) from the standard curves you made above, divided by the assay volume 
+The emission coefficient is the slope (m) from the emission standard curves you made above, divided by the assay volume 
 
 Pay attention to units! 
 **slope (m) units** from the standard curves = fluor/uM = fluor/ (umol/L) = fluor L / umol = fluor mL / nmol
@@ -283,12 +231,13 @@ Pay attention to units!
 
 The protocol states: "Make sure this is calculated with the MUB concentrations in nmol/mL, which is equivalent to umol/L."" 
 
-```{r, emission-coefficient}
+```{r, extintion-coefficient}
 assay_vol_ml <- 0.250
 
 # emission coefficient units are fluorescence / nmol
-calc_emission <-  coeff %>% 
-  mutate(emission_coeff = slope/assay_vol_ml)
+calc_emission <-  emission_only %>% 
+  mutate(ext_coeff_fluor_per_nmol = m_slope/assay_vol_ml) %>% 
+  select(plate, max_fluor, ext_coeff_fluor_per_nmol, intcpt)
 
 calc_emission
 ```
@@ -296,13 +245,16 @@ calc_emission
 
 ### Calculate the quench coefficient 
 ```{r, quench-coefficient}
+quench_coeff <- stds_coeffs %>% 
+  pivot_wider(id_cols = plate, names_from = id, names_prefix = "slope_", values_from = m_slope) %>% 
+  mutate(quench_coeff_no_unit = slope_quench/slope_emission)
 
+quench_coeff
 
-# quench coefficient
-calc_emission <-  coeff %>% 
-  mutate(emission_coeff = slope/assay_vol_ml)
+all_calcs <- cbind(quench_coeff, calc_emission) %>% 
+  select(-id, -plate1)
 
-calc_emission
+all_calcs
 ```
 
 
@@ -310,26 +262,11 @@ calc_emission
 ### Add linear model data to sample dataset 
 
 ```{r}
-# Remove standards from absorbance dataset
-samples <- mean.abs[grepl(std_key, mean.abs$ID, fixed=TRUE)==FALSE, ]
+#clean_data
+```
 
-# Add coefficients and max conc for standard curves
-coeff <- data.frame(coeff, stringsAsFactors = FALSE)
-samples <- merge(samples, coeff, by = "Plate")
-samples$intcpt <- as.numeric(samples$intcpt)
-samples$slope <- as.numeric(samples$slope)
-samples$max.abs <- as.numeric(samples$max.abs)
 
-# Flag data from plates with bad standard curves
-samples$keep <- ifelse(is.na(samples$intcpt), "no", samples$keep)
-samples$reason <- ifelse(is.na(samples$intcpt), "Bad standard curve", samples$reason)
+```{r}
 
-# If the absorbance of a sample is greater than the absorbance
-#   of the highest concentration standard, flag the data
-samples$keep <- ifelse(!is.na(samples$max.abs) & samples$abs > samples$max.abs,"no", samples$keep)
-
-samples$reason <- ifelse(!is.na(samples$max.abs) & samples$abs > samples$max.abs, "Outside linear range", samples$reason)
-
-head(samples)
 ```
 
