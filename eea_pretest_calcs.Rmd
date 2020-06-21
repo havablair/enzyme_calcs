@@ -43,10 +43,11 @@ Now you are ready to read in your files. If you get an error, check whether you 
 file.names <- dir("./plater-templates/")
 file.paths<- paste0("./plater-templates/", file.names)
 plates <- read_plates(file.paths)
-colnames(plates) <- c("plate", "wells", "id", "fluor", "bad_wells", "ph_batch")
+colnames(plates) <- c("plate", "wells", "id", "fluor", "bad_wells", "ph_batch", "conc_uM")
 head(plates)
 unique(plates$plate) # To check that all plates read in correctly
-nrow(plates)
+colnames(plates)
+
 ```
 
 ## Remove empty wells and known bad wells
@@ -68,7 +69,27 @@ wells_removed <- nrow(plates) - nrow(no_bad)
 glue("Removed {wells_removed} wells that were missing or bad")
 
 clean_data <- no_bad
+
+clean_nested <- clean_data %>% 
+  group_by(plate) %>% 
+  nest()
+
 ```
+
+```{r}
+get_plate_blank <- function(data){
+  buf <- data %>% 
+    filter(id == "Buf")
+    mean(buf$fluor)
+}
+
+test <- clean_nested %>% 
+  mutate(plate_blank = map_dbl(data, get_plate_blank))
+
+test
+
+```
+
 
 ## Emission coefficient determination
 
@@ -81,12 +102,14 @@ plate_blanks <- clean_data %>%
   group_by(plate) %>% 
   summarise(plate_blnk_mean = mean(fluor), n = n())
 
-# Average the MUB standard values (column 10) for each MUB concentration
+# Average the MUB standard values ( in column 10) for each MUB concentration (4 different conc)
 mub_stds <- clean_data %>% 
-  select(plate, wells, id, fluor, ph_batch) %>% 
+  select(plate, wells, id, fluor, ph_batch, conc_uM) %>% 
   filter(str_detect(wells, "10")) %>% 
   group_by(plate, id) %>% 
   summarise(mub_std_mean = mean(fluor), n = n())
+
+mub_stds
 
 #Create a column for the plate blank values by joining the plate_blanks and mub_stds tbls
 join_std_blnk <- left_join(plate_blanks, mub_stds, by = "plate")
@@ -104,33 +127,162 @@ ext_coeff_tbl
 ```{r}
  #Obtain the plate blank + soil fluorescence value by averaging the values in column 11 (id = Buf+s) of each plate
 
-plate_blnk_soil <- clean_data %>% 
-  select(plate, wells, id, fluor, ph_batch) %>% 
-  filter(id == "Buf+s") %>% 
-  group_by(plate) %>% 
-  summarise(plate_blnk_soil_mean = mean(fluor), n = n())
+# plate_blnk_soil <- clean_data %>% 
+#   select(plate, wells, id, fluor, ph_batch) %>% 
+#   filter(id == "Buf+s") %>% 
+#   group_by(plate) %>% 
+#   summarise(plate_blnk_soil_mean = mean(fluor), n = n())
 
 # Average the MUB+soil fluorescence values (column 9) for each MUB concentration
 mub_soil_stds <- clean_data %>% 
-  select(plate, wells, id, fluor, ph_batch) %>% 
+  select(plate, wells, id, fluor, ph_batch, conc_uM) %>% 
   filter(str_detect(wells, "09")) %>% 
-  group_by(plate, id) %>% 
-  summarise(mub_soil_std_mean = mean(fluor), n = n())
+  group_by(plate, conc_uM) %>% 
+  summarise(corr_std_mean = mean(fluor), n = n())
 
-#Create a column for the plate blank values by joining the plate_blanks and mub_stds tbls
-join_soil_std_blnk <- left_join(plate_blnk_soil, mub_soil_stds, by = "plate")
+mub_soil_stds <- mub_soil_stds %>% 
+  rename(mub_conc_uM = conc_uM)
 
-join_soil_std_blnk
+mub_soil_stds
+
+# #Create a column for the plate blank values by joining the plate_blanks and mub_stds tbls
+# join_soil_std_blnk <- left_join(plate_blnk_soil, mub_soil_stds, by = "plate")
+# 
+# join_soil_std_blnk
 
 #Subtract the blank values from the fluorescence values for each averaged MUB concentration
-quench_tbl <- join_soil_std_blnk %>% 
-  select(-n.x, -n.y) %>% 
-  mutate(corr_std_mean = mub_soil_std_mean - plate_blnk_soil_mean, mub_conc_uM = str_replace(join_soil_std_blnk$id, "MUB", ""))
+# quench_tbl <- join_soil_std_blnk %>% 
+#   select(-n.x, -n.y) %>% 
+#   mutate(corr_std_mean = mub_soil_std_mean - plate_blnk_soil_mean, mub_conc_uM = str_replace(join_soil_std_blnk$id, "MUB", ""))
+# 
+# mub_soil_stds$conc_uM <- str_replace(mub_soil_stds$conc_uM, "mub_", "")
+# mub_soil_stds$conc_uM <- as.numeric(mub_conc_uM$mub_conc_uM)
 
-quench_tbl$mub_conc_uM <- str_replace(quench_tbl$mub_conc_uM, "\\+", "")
-quench_tbl$mub_conc_uM <- as.numeric(str_replace(quench_tbl$mub_conc_uM, "S", ""))
+quench_tbl <- mub_soil_stds
+quench_tbl$mub_conc_uM <- as.numeric(str_replace(quench_tbl$mub_conc_uM, "mub_", ""))
+
+quench_tbl
+ext_coeff_tbl
+```
+
+## Put the data for the extinction & quench standard curves in nested table 
+
+```{r}
+colnames(clean_nested) <- c("plate", "all_data")
+
+ext_nested <- ext_coeff_tbl %>% 
+  group_by(plate) %>% 
+  nest()
+
+colnames(ext_nested) <- c("plate", "ext_data")
+
+quench_nested <- quench_tbl %>% 
+  group_by(plate) %>% 
+  nest()
+
+colnames(quench_nested) <- c("plate", "quench_data")
+
+
+nest_groups <- merge(clean_nested, ext_nested, by = "plate")
+nest_groups <- merge(nest_groups, quench_nested)
+
+nest_groups
+```
+
+
+##Functions to operate on the nested dataframe 
+
+```{r}
+lm_mod_ftn <- function(df){
+  lm(corr_std_mean ~ mub_conc_uM, data = df)
+}
+
+b_fun <- function(mod){
+  coefficients(mod)[[1]]
+}
+
+slope_fun <- function(mod){
+  coefficients(mod)[[2]]
+}
+
+r_sq_fun <- function(mod){
+  summary(mod)[["r.squared"]]
+}
+
+max_fluor_fun <- function(data){
+  max(data$corr_std_mean)
+}
 
 ```
+
+
+##Run linear models for standard curves (extinction & quench)
+
+```{r}
+lm_calcs <- nest_groups %>% 
+  mutate(ext_lm = map(ext_data, lm_mod_ftn), quench_lm = map(quench_data, lm_mod_ftn))
+
+lm_calcs
+
+```
+
+##Extract model details 
+
+```{r}
+
+ext_mod_details <- lm_calcs %>% 
+  mutate(ext_intcpt = map_dbl(ext_lm, b_fun), ext_m_slope = map_dbl(ext_lm, slope_fun), ext_r_squared = map_dbl(ext_lm, r_sq_fun), ext_max_fluor = map_dbl(ext_data, max_fluor_fun))
+
+ext_mod_details
+
+quench_mod_details <- lm_calcs %>% 
+  mutate(quench_intcpt = map_dbl(quench_lm, b_fun), quench_m_slope = map_dbl(quench_lm, slope_fun), quench_r_squared = map_dbl(quench_lm, r_sq_fun), quench_max_fluor = map_dbl(quench_data, max_fluor_fun))
+
+quench_mod_details
+
+```
+
+# Plot emission curves
+```{r, emission-curves}
+emission_only <- subset(stds_coeffs, id == "emission")
+
+ext_coeff_tbl %>% 
+  ggplot(aes(x = mub_conc_uM, y = corr_std_mean, color = plate)) + 
+  geom_point() + 
+  geom_abline(data = emission_only, aes(slope = m_slope, intercept = intcpt, color = plate)) +
+  geom_text(data = emission_only, aes(x = 1.5, y = 8000,
+                          label = paste("R^2=", round(r_squared, digits = 3))), inherit.aes = FALSE) + 
+  geom_text(data = emission_only, aes(x = 1.0, y = 10000,
+                                    label = paste(" y= ", round(m_slope, digits = 2),
+                                      "x", " + ", round(intcpt, digits = 2))), inherit.aes = FALSE) + 
+  facet_wrap(vars(plate)) + 
+  
+labs(title = "Emission standard curves")
+```
+
+
+# Plot quench curves
+```{r, quench-curves}
+quench_only <- subset(stds_coeffs, id == "quench")
+
+quench_tbl %>% 
+  ggplot(aes(x = mub_conc_uM, y = corr_std_mean, color = plate)) + 
+  geom_point() + 
+  geom_abline(data = quench_only, aes(slope = m_slope, intercept = intcpt, color = plate)) +
+  geom_text(data = quench_only, aes(x = 1.5, y = 2000,
+                          label = paste("R^2=", round(r_squared, digits = 3))), inherit.aes = FALSE) + 
+  geom_text(data = quench_only, aes(x = 1.0, y = 2500,
+                                    label = paste(" y= ", round(m_slope, digits = 2),
+                                      "x", " + ", round(intcpt, digits = 2))), inherit.aes = FALSE) + 
+  facet_wrap(vars(plate)) + 
+  
+labs(title = "Quench standard curves")
+                                        
+
+```
+
+
+
 
 ## Combine the emission and quench coefficient tables 
 
@@ -180,45 +332,6 @@ stds_coeffs
 
 ```
 
-# Plot emission curves
-```{r, emission-curves}
-emission_only <- subset(stds_coeffs, id == "emission")
-
-ext_coeff_tbl %>% 
-  ggplot(aes(x = mub_conc_uM, y = corr_std_mean, color = plate)) + 
-  geom_point() + 
-  geom_abline(data = emission_only, aes(slope = m_slope, intercept = intcpt, color = plate)) +
-  geom_text(data = emission_only, aes(x = 1.5, y = 8000,
-                          label = paste("R^2=", round(r_squared, digits = 3))), inherit.aes = FALSE) + 
-  geom_text(data = emission_only, aes(x = 1.0, y = 10000,
-                                    label = paste(" y= ", round(m_slope, digits = 2),
-                                      "x", " + ", round(intcpt, digits = 2))), inherit.aes = FALSE) + 
-  facet_wrap(vars(plate)) + 
-  
-labs(title = "Emission standard curves")
-```
-
-
-# Plot quench curves
-```{r, quench-curves}
-quench_only <- subset(stds_coeffs, id == "quench")
-
-quench_tbl %>% 
-  ggplot(aes(x = mub_conc_uM, y = corr_std_mean, color = plate)) + 
-  geom_point() + 
-  geom_abline(data = quench_only, aes(slope = m_slope, intercept = intcpt, color = plate)) +
-  geom_text(data = quench_only, aes(x = 1.5, y = 2000,
-                          label = paste("R^2=", round(r_squared, digits = 3))), inherit.aes = FALSE) + 
-  geom_text(data = quench_only, aes(x = 1.0, y = 2500,
-                                    label = paste(" y= ", round(m_slope, digits = 2),
-                                      "x", " + ", round(intcpt, digits = 2))), inherit.aes = FALSE) + 
-  facet_wrap(vars(plate)) + 
-  
-labs(title = "Quench standard curves")
-                                        
-
-```
-
 
 ### Calculate extinction coefficient
 
@@ -259,10 +372,22 @@ all_calcs
 
 
 
-### Add linear model data to sample dataset 
+### Add extinction & quench data to sample dataset 
 
 ```{r}
-#clean_data
+
+clean_with_calcs <- left_join(clean_data, all_calcs, by = "plate")
+
+clean_with_calcs
+
+#can use an ifelse statement to restore the mub concentrations to the clean_data tbl? Maybe first do the mean calcs for each assay and substrate blank row, then restore the mub conentrations to the table
+
+# nest by template and average by conc_uM
+
+clean_with_calcs %>% 
+  group_by(plate) %>% 
+  nest()
+
 ```
 
 
