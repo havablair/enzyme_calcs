@@ -13,6 +13,7 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(plater)
 library(glue)
+library(broom)
 
 ```
 
@@ -46,7 +47,6 @@ plates <- read_plates(file.paths)
 colnames(plates) <- c("plate", "wells", "id", "fluor", "bad_wells", "ph_batch", "conc_uM")
 head(plates)
 unique(plates$plate) # To check that all plates read in correctly
-colnames(plates)
 
 ```
 
@@ -117,8 +117,8 @@ mub_std_test <- test %>%
 
 corr_test <- mub_std_test %>% 
   unnest(mub_std_values) %>% 
-  mutate(corr_mub_std = mub_std_mean - plate_blank, mub_conc_uM = as.numeric(str_replace(id, "MUB", ""))) %>% 
-  nest(std_data = c(plate_blank, id, mub_std_mean, n, corr_mub_std, mub_conc_uM))
+  mutate(corr_std_mean = mub_std_mean - plate_blank, conc_uM = as.numeric(str_replace(id, "MUB", ""))) %>% 
+  nest(std_data = c(plate_blank, id, mub_std_mean, n, corr_std_mean, conc_uM))
 
 corr_test
 
@@ -139,13 +139,14 @@ calc_mub_soil_blnk <- corr_test %>%
 
 calc_mub_soil_blnk
 
+#Average the MUB+soil wells (homogenate blanks) to get mean fluorescence for each concentration
 quench_std_fun <- function(data){
   data %>%
     select(wells, id, fluor, ph_batch, conc_uM) %>% 
     filter(str_detect(wells, "09")) %>% 
-    mutate(conc_uM = as.numeric(str_replace(conc_uM, "mub_", ""))) %>% 
+    mutate(conc_uM = as.numeric(str_replace(conc_uM, "mub_", ""))) %>%
     group_by(conc_uM) %>% 
-    summarise(mub_std_mean = mean(fluor), n = n()) #Add CV here?
+    summarise(mub_soil_std_mean = mean(fluor), n = n()) #Add CV here?
 }
 
 quench_test <- calc_mub_soil_blnk %>% 
@@ -153,55 +154,31 @@ quench_test <- calc_mub_soil_blnk %>%
 
 quench_test
 
-#Subtract the blank values from the fluorescence values for each averaged MUB concentration
+#Subtract the blank values from the fluorescence values for each averaged MUB concentration and nest the results with the other quench data
 
-## START HERE on Tuesday morning.  Unnest the quench_std_values as above and calculate corrected fluor for the standard curve. 
+quench_nested <- quench_test %>% 
+  unnest(quench_std_values) %>% 
+  mutate(corr_std_mean = mub_soil_std_mean - mub_soil_blank) %>% 
+  nest(quench_data = c(mub_soil_blank, conc_uM, mub_soil_std_mean, n, corr_std_mean))
 
-# quench_tbl <- join_soil_std_blnk %>% 
-#   select(-n.x, -n.y) %>% 
-#   mutate(corr_std_mean = mub_soil_std_mean - plate_blnk_soil_mean, mub_conc_uM = str_replace(join_soil_std_blnk$id, "MUB", ""))
-# 
-# mub_soil_stds$conc_uM <- str_replace(mub_soil_stds$conc_uM, "mub_", "")
-# mub_soil_stds$conc_uM <- as.numeric(mub_conc_uM$mub_conc_uM)
+quench_nested
 
-quench_tbl <- mub_soil_stds
-quench_tbl$mub_conc_uM <- as.numeric(str_replace(quench_tbl$mub_conc_uM, "mub_", ""))
-
-quench_tbl
-ext_coeff_tbl
 ```
 
-## Put the data for the extinction & quench standard curves in nested table 
+##Linear model calculations 
 
 ```{r}
-colnames(clean_nested) <- c("plate", "all_data")
+#function to run a linear model x = MUB concentration, y = mean fluorescence
 
-ext_nested <- ext_coeff_tbl %>% 
-  group_by(plate) %>% 
-  nest()
-
-colnames(ext_nested) <- c("plate", "ext_data")
-
-quench_nested <- quench_tbl %>% 
-  group_by(plate) %>% 
-  nest()
-
-colnames(quench_nested) <- c("plate", "quench_data")
-
-
-nest_groups <- merge(clean_nested, ext_nested, by = "plate")
-nest_groups <- merge(nest_groups, quench_nested)
-
-nest_groups
-```
-
-
-##Functions to operate on the nested dataframe 
-
-```{r}
 lm_mod_ftn <- function(df){
-  lm(corr_std_mean ~ mub_conc_uM, data = df)
+  lm(corr_std_mean ~ conc_uM, data = df)
 }
+
+#can use this same function to calculate stats for both standard sets of standard curves 
+lm_calcs <- quench_nested %>% 
+  mutate(emis_lm = map(std_data, lm_mod_ftn), quench_lm = map(quench_data, lm_mod_ftn))
+
+# functions to extract linear model details calculated above into a nicer format for putting in our graphs
 
 b_fun <- function(mod){
   coefficients(mod)[[1]]
@@ -219,157 +196,96 @@ max_fluor_fun <- function(data){
   max(data$corr_std_mean)
 }
 
+#Extract linear model details from the buffer control linear model
+emis_lm_details <- lm_calcs %>% 
+  mutate(intcpt_emis = map_dbl(emis_lm, b_fun), slope_emis = map_dbl(emis_lm, slope_fun), r_squared_emis = map_dbl(emis_lm, r_sq_fun), max_fluor_emis = map_dbl(std_data, max_fluor_fun))
+
+#nest the linear model details in a dataframe
+nest_emis_stats <- emis_lm_details %>% 
+  nest(lm_stats_emis = c(intcpt_emis, slope_emis, r_squared_emis, max_fluor_emis))
+
+#Extract linear models details from the homogenate control linear model
+quench_lm_details <- nest_emis_details %>% 
+  mutate(intcpt_quench = map_dbl(quench_lm, b_fun), slope_quench = map_dbl(quench_lm, slope_fun), r_squared_quench = map_dbl(quench_lm, r_sq_fun), max_fluor_quench = map_dbl(quench_data, max_fluor_fun))
+
+#nest the linear model details in a dataframe
+nest_quench_stats <- quench_lm_details %>% 
+  nest(lm_stats_quench = c(intcpt_quench, slope_quench, r_squared_quench, max_fluor_quench))
+
+nest_quench_stats$lm_stats_emis
 ```
 
 
-##Run linear models for standard curves (extinction & quench)
+## Buffer control (MUB + Buffer) standard curves 
 
 ```{r}
-lm_calcs <- nest_groups %>% 
-  mutate(ext_lm = map(ext_data, lm_mod_ftn), quench_lm = map(quench_data, lm_mod_ftn))
+#Function to make standard curve plots
 
-lm_calcs
+plot_pts_fun <- function(std_data, lm_stats_emis, plate){
+  g <- ggplot() + 
+  geom_point(data = std_data, aes(x = conc_uM, y = corr_std_mean)) + 
+    geom_abline(data = lm_stats_emis, aes(slope = slope_emis, intercept = intcpt_emis)) +
+    geom_text(data = lm_stats_emis, aes(x = 1.0, y = 8000, label = paste("R^2=", round(r_squared_emis, digits = 3))), inherit.aes = FALSE) +
+    geom_text(data = lm_stats_emis, aes(x = 1.0, y = 10000, label = paste(" y= ", round(slope_emis, digits = 2), "x", " + ", round(intcpt_emis, digits = 2))), inherit.aes = FALSE) + 
+    labs(title = glue("{plate} buffer control standard curve"))
+  return(g)
+}
+
+
+plot_test <- nest_quench_stats %>% 
+  mutate(plot_buffer_control = pmap(list(std_data, lm_stats_emis, plate), plot_pts_fun))
+
+plot_test$plot_buffer_control
+
 
 ```
-
-##Extract model details 
+## Homogenate control standard curves 
 
 ```{r}
+plot_homog_fun <- function(quench_data, lm_stats_quench, plate){
+  g <- ggplot() + 
+  geom_point(data = quench_data, aes(x = conc_uM, y = corr_std_mean)) + 
+    geom_abline(data = lm_stats_quench, aes(slope = slope_quench, intercept = intcpt_quench)) +
+    geom_text(data = lm_stats_quench, aes(x = 1.0, y = (max_fluor_quench-300), label = paste("R^2=", round(r_squared_quench, digits = 3))), inherit.aes = FALSE) +
+    geom_text(data = lm_stats_quench, aes(x = 1.0, y = (max_fluor_quench - 500), label = paste(" y= ", round(slope_quench, digits = 2), "x", " + ", round(intcpt_quench, digits = 2))), inherit.aes = FALSE) + 
+    labs(title = glue("{plate} homogenate control standard curve"))
+  return(g)
+}
 
-ext_mod_details <- lm_calcs %>% 
-  mutate(ext_intcpt = map_dbl(ext_lm, b_fun), ext_m_slope = map_dbl(ext_lm, slope_fun), ext_r_squared = map_dbl(ext_lm, r_sq_fun), ext_max_fluor = map_dbl(ext_data, max_fluor_fun))
 
-ext_mod_details
+homog_plots <- plot_test %>% 
+  mutate(plot_homog_control = pmap(list(quench_data, lm_stats_quench, plate), plot_homog_fun))
 
-mod_details <- ext_mod_details %>% 
-  mutate(quench_intcpt = map_dbl(quench_lm, b_fun), quench_m_slope = map_dbl(quench_lm, slope_fun), quench_r_squared = map_dbl(quench_lm, r_sq_fun), quench_max_fluor = map_dbl(quench_data, max_fluor_fun))
-
-mod_details
+homog_plots$lm_stats_emis
 
 ```
 
-# Plot emission curves
-```{r, emission-curves}
-plate_list <- unique(mod_details$plate)
-index <- c(1:4)
+##Calculate emission coefficient
+
+The *emission coefficient* is ((DEFINITION))
+Formula for emission coefficient is:   (nice formatted formula)
+
+The emission coefficient is the slope (m) from the emission standard curves you made above, divided by the assay volume 
+
+Pay attention to units! 
+**slope (m) units** from the standard curves = fluor/uM = fluor/ (umol/L) = fluor L / umol = fluor mL / nmol
+
+**assay volume** is 250uL = 0.00025 L = 0.250 mL 
+
+The protocol states: "Make sure this is calculated with the MUB concentrations in nmol/mL, which is equivalent to umol/L."" 
+
+```{r, emission-coefficient}
+
+# emission coefficient units are fluorescence / nmol
 
 
-ext_curve_plot <- function(plate){
-  
-  plate_data <- mod_details %>% 
-    unnest(ext_data) %>% 
-    filter(plate == plate)
-  plate_data %>% 
-    ggplot(aes(x = mub_conc_uM, y = corr_std_mean)) + 
-    geom_point() + 
-    geom_abline(data = plate_data, aes(slope = ext_m_slope, intercept = ext_intcpt)) +
-    geom_text(data = plate_data, aes(x = 1.5, y = 8000,
-                          label = paste("R^2=", round(ext_r_squared, digits = 3))), inherit.aes = FALSE) + 
-    geom_text(data = plate_data, aes(x = 1.0, y = 10000,
-                                    label = paste(" y= ", round(ext_m_slope, digits = 2),
-                                      "x", " + ", round(ext_intcpt, digits = 2))), inherit.aes = FALSE) +
-    labs(title = glue("{plate} emission standard curve"))
-  
-}
-  
-quench_curve_plot <- function(plate, quench_data_df){
-  quench_data_df %>% 
-  ggplot(aes(x = mub_conc_uM, y = corr_std_mean)) + 
-  geom_point() + 
-  geom_abline(data = mod_details, aes(slope = quench_m_slope, intercept = quench_intcpt)) +
-  geom_text(data = mod_details, aes(x = 1.5, y = 2000,
-                          label = paste("R^2=", round(quench_r_squared, digits = 3))), inherit.aes = FALSE) + 
-  geom_text(data = mod_details, aes(x = 1.0, y = 2500,
-                                    label = paste(" y= ", round(quench_m_slope, digits = 2),
-                                      "x", " + ", round(quench_intcpt, digits = 2))), inherit.aes = FALSE) + 
-  labs(title = glue("{plate} quench standard curves"))
-  
-}
+assay_vol_ml <- 0.250
 
+emis_calc <- homog_plots %>% 
+  mutate(emiss_coeff = map_dbl(lm_stats_emis, ~ as.numeric(.x[["slope_emis"]])/assay_vol_ml))
 
+emis_calc
 
-## Add the standard curves to the nested table 
-add_std_curves <- mod_details %>% 
-  mutate(ext_std_curves = pmap(mod_details$ext_data, index, plate_list, ext_curve_plot))
-   
-add_std_curves$ext_std_curves      
-         # , 
-         # quench_std_curves = map2(plate_list, mod_details$quench_data, quench_curve_plot))
-         # 
-
-ext_curve_plot("1B-ST2-7")
-
-plate_1 <- mod_details %>% 
-  unnest(ext_data) %>% 
-  filter(plate == "1B-ST2-7") %>% 
-  select(corr_std_mean, mub_conc_uM, ext_intcpt, ext_m_slope, ext_r_squared, ext_max_fluor)
-
-ggplot(plate_1) +
-  geom_point(aes(x = mub_conc_uM, y = corr_std_mean))
-
-plate_1 <- as.data.frame(plate_1)
-
-typeof(plate_1)
-
-
-```
-
-
-# Plot quench curves
-```{r, quench-curves}
-
-                                        
-
-```
-
-
-
-
-## Combine the emission and quench coefficient tables 
-
-
-```{r}
-quench_select <- quench_tbl %>% 
-  select(plate, id, corr_std_mean, mub_conc_uM) %>% 
-  mutate(id = "quench")
-
-ext_select <- ext_coeff_tbl %>% 
-  select(plate, id, corr_std_mean, mub_conc_uM) %>% 
-  mutate(id = "emission")
-
-stds_for_lm <- rbind(quench_select, ext_select)
-
-stds_list_cols <- stds_for_lm %>% 
-  group_by(plate, id) %>% 
-  nest()
-
-lm_mod_ftn <- function(df){
-  lm(corr_std_mean ~ mub_conc_uM, data = df)
-}
-
-m_stds_list <- stds_list_cols %>% 
-  mutate(model = map(data, lm_mod_ftn))
-
-b_fun <- function(mod){
-  coefficients(mod)[[1]]
-}
-
-slope_fun <- function(mod){
-  coefficients(mod)[[2]]
-}
-
-r_sq_fun <- function(mod){
-  summary(mod)[["r.squared"]]
-}
-
-max_fluor_fun <- function(data){
-  max(data$corr_std_mean)
-}
-
-stds_coeffs <- m_stds_list %>% 
-  transmute(intcpt = map_dbl(model, b_fun), m_slope = map_dbl(model, slope_fun), r_squared = map_dbl(model, r_sq_fun), max_fluor = map_dbl(data, max_fluor_fun))
-
-stds_coeffs
 
 ```
 
