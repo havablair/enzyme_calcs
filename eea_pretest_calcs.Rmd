@@ -14,6 +14,7 @@ library(tidyverse)
 library(plater)
 library(glue)
 library(broom)
+library(hms)
 
 ```
 
@@ -34,8 +35,6 @@ Files used with this version of the script should contain all the metadata in th
   
   --"bad_wells" = identifies any wells that have known problems (ex. pipetting errors).  May be coded as "bad", "Bad", "x", or "X".  Anything with NA (blank) will be kept as "good"
   
-  --"ph_batch" has the pH of the buffer you used for this plate
-  
 The files you want to process must all be in a single folder, and that folder must not contain any other files R will attempt to read in all files in the designated folder.
 
 Now you are ready to read in your files. If you get an error, check whether you have any extra CSV files in the designated folder.
@@ -47,6 +46,27 @@ plates <- read_plates(file.paths)
 colnames(plates) <- c("plate", "wells", "id", "fluor", "bad_wells", "ph_batch", "conc_uM")
 head(plates)
 unique(plates$plate) # To check that all plates read in correctly
+
+#read in plate metadata
+plate_metadata <- read.csv("./eea_plate_metadata.csv", stringsAsFactors = FALSE)
+
+colnames(plate_metadata) <- c("plate", "sample_id", "ph_buffer", "moist_soil_mass_g", "soil_water_content", "vol_buffer_ml", "substrates", "time_soil_added", "time_naoh_added", "time_plate_read")
+
+#parse the time columns so we can do math on them
+plate_metadata <- plate_metadata %>% 
+  mutate(time_soil_added = parse_hm(time_soil_added), 
+         time_naoh_added = parse_hm(time_soil_added), 
+         time_plate_read = parse_hm(time_plate_read))
+
+# calculate incubation time and convert from seconds to hours
+plate_metadata <- plate_metadata %>% 
+  mutate(inc_time_hr = as.numeric(((time_plate_read - time_soil_added)/60/60)))
+
+#calculate soil oven dry equivalent 
+
+plate_metadata <- plate_metadata %>% 
+  mutate(soil_ov_dry_eq_g = moist_soil_mass_g - (moist_soil_mass_g * soil_water_content))
+
 
 ```
 
@@ -79,6 +99,9 @@ clean_nested <- clean_data %>%
   group_by(plate) %>% 
   nest()
 
+clean_data
+
+clean_nested$data
 ```
 
 ```{r}
@@ -96,7 +119,7 @@ test
 ```
 
 
-## MUB Standard calculations
+## MUB Standard calculations (for emission coeff calc)
 
 ```{r}
 mub_std_fun <- function(data){
@@ -212,7 +235,7 @@ quench_lm_details <- nest_emis_stats %>%
 nest_quench_stats <- quench_lm_details %>% 
   nest(lm_stats_quench = c(intcpt_quench, slope_quench, r_squared_quench, max_fluor_quench))
 
-nest_quench_stats$lm_stats_emis
+nest_quench_stats
 ```
 
 
@@ -301,12 +324,117 @@ The quench coefficient is calculated as the slope of the quench standard curve d
 quench_coeff <- emis_calc %>% 
   mutate(quench_coeff = map2_dbl(lm_stats_emis, lm_stats_quench, ~ as.numeric(.x[["slope_emis"]])/as.numeric(.y[["slope_quench"]])))
 
+quench_coeff
   
 ```
 
 
 
-### Calculate means for assay and substrate control wells 
+### Calculate means for assay and substrate control wells
+
+```{r}
+#extract the values for plate blank, homogenate blank (mub_soil_blank), emission coefficient, and quench coefficient
+plate_data <- quench_coeff %>% 
+  select(plate, plate_blank, mub_soil_blank, emiss_coeff, quench_coeff)
+
+plate_data_df <- as.data.frame(plate_data)
+
+#Calculate the mean fluorescence for the assay wells
+mean_fluor_calcs <- clean_data %>% 
+  filter(str_detect(id, "Assay")) %>% 
+  group_by(plate, id, conc_uM) %>% 
+  summarise(fluor_mean = mean(fluor), n = n(), sd = sd(fluor, na.rm = T), cv = sd(fluor, na.rm = T)/mean(fluor)*100)
+  
+mean_fluor_calcs <- mean_fluor_calcs %>% 
+  mutate(conc_uM = as.numeric(str_replace(conc_uM, "sub_", "")))
+
+#QC check - plot dist of each sample and enzyme to see what's normal?
+
+#calculate the mean fluorescence for the substrate control wells
+sub_controls <- clean_data %>% 
+  filter(str_detect(id, "Blank")) %>% 
+  group_by(plate, id, conc_uM) %>% 
+  summarise(fluor_sub_control = mean(fluor), n = n(), sd = sd(fluor, na.rm = T), cv = sd(fluor, na.rm = T)/mean(fluor)*100) 
+
+sub_controls <- sub_controls %>% 
+  mutate(conc_uM = as.numeric(str_replace(conc_uM, "sub_", "")))
+
+#select the columns for the mean substrate control fluorescence, plate number, and con_uM
+sub_controls_select <- sub_controls %>% 
+  select(fluor_sub_control, plate, conc_uM, id)
+
+
+mean_fluor_calcs
+
+assay_wells <- mean_fluor_calcs %>% 
+  select(plate, id, conc_uM, fluor_mean)
+  
+substrate_controls <- sub_controls_select %>% 
+  rename(fluor_mean = fluor_sub_control)
+
+substrate_controls
+assay_wells
+
+
+merged <- rbind(substrate_controls, assay_wells)
+
+fluor_wide <- merged %>% 
+  pivot_wider(id_cols = c(plate, conc_uM), names_from = id, values_from = fluor_mean, names_prefix = "mean_fluor_", names_sep = "_")
+
+
+#join the assay well fluorescence calculations with the plate daa (quench coff, emission coeff, blanks)
+fluor_wide <- left_join(fluor_wide, plate_data_df, by = "plate")
+
+fluor_wide
+
+mean_fluor_calcs
+
+```
+##Calculate net fluorescence 
+
+Net fluorescence = ((assay-homogenate control) / quench coefficient) - (substrate control-plate blank)
+
+```{r, net-fluor-calc}
+
+net_fluor_calcs <- fluor_wide %>% 
+  mutate(net_fluor = ((`mean_fluor_B-Assay-ST2` - mub_soil_blank)/quench_coeff)-(`mean_fluor_B-Blank` - plate_blank))
+
+```
+
+
+##Calculate activity 
+
+Activity(nmol/g^-1 h^-1) = [Net fluor x buffer vol (mL)] / [emis coeff x homogenate vol(mL) x time(h) x soil mass(g)]
+
+Activity units are nmol / g^-1 hr^-1
+
+```{r, activity-calc}
+
+#buffer vol is the volume of buffer used to make the soil slurries. In the pre-test, this is 25mL.  In the regular protocol, it is 50mL
+buffer_vol_ml <- 25
+
+#vol of homogenate added to the assay wells
+homogenate_vol_ml <- 0.200 
+
+add_metadata <- left_join(net_fluor_calcs, plate_metadata, by = "plate")
+
+add_metadata
+
+activity_calcs <- add_metadata %>% 
+  mutate(activity = (net_fluor * buffer_vol_ml) / (emiss_coeff * homogenate_vol_ml * inc_time_hr * soil_ov_dry_eq_g))
+
+activity_calcs
+
+activity_calcs %>% 
+  ggplot() +
+  geom_point(aes(x = conc_uM, y = activity, color = plate)) +
+  facet_wrap(vars(plate))
+
+
+```
+
+
+### Old convoluted approach to calculating means for assay and substrate control wells
 
 ```{r}
 # to get the assay fluorescence, need to average the assay wells for each enzyme at the different substrate concentrations  (group by id, conc_uM) and then substract the homogenate blank (mub_soil_blank)
@@ -321,8 +449,6 @@ assay_fluor_fun <- function(data, mub_soil_blank){
 assay_fluor_calc <- quench_coeff %>% 
   mutate(assay_fluor_data = map2(data, mub_soil_blank, assay_fluor_fun))
 
-assay_fluor_calc$assay_fluor_data
-
 # substrate controls need to be averaged across the different concentrations, and subtract the plate blank 
 
 subs_control_fun <- function(data, plate_blank){
@@ -335,7 +461,9 @@ subs_control_fun <- function(data, plate_blank){
 sub_control_calc <- assay_fluor_calc %>% 
   mutate(sub_control_data = map2(data, plate_blank, subs_control_fun))
 
-sub_control_calc$assay_fluor_data
+join_df <- function(assay_fluor_data, sub_control_data, quench_coeff, emiss_coeff){
+  
+}
 ```
 ##Calculate net fluorescence 
 
