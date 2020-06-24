@@ -118,7 +118,7 @@ mub_std_test <- test %>%
 corr_test <- mub_std_test %>% 
   unnest(mub_std_values) %>% 
   mutate(corr_std_mean = mub_std_mean - plate_blank, conc_uM = as.numeric(str_replace(id, "MUB", ""))) %>% 
-  nest(std_data = c(plate_blank, id, mub_std_mean, n, corr_std_mean, conc_uM))
+  nest(std_data = c(id, mub_std_mean, n, corr_std_mean, conc_uM))
 
 corr_test
 
@@ -159,7 +159,7 @@ quench_test
 quench_nested <- quench_test %>% 
   unnest(quench_std_values) %>% 
   mutate(corr_std_mean = mub_soil_std_mean - mub_soil_blank) %>% 
-  nest(quench_data = c(mub_soil_blank, conc_uM, mub_soil_std_mean, n, corr_std_mean))
+  nest(quench_data = c(conc_uM, mub_soil_std_mean, n, corr_std_mean))
 
 quench_nested
 
@@ -205,7 +205,7 @@ nest_emis_stats <- emis_lm_details %>%
   nest(lm_stats_emis = c(intcpt_emis, slope_emis, r_squared_emis, max_fluor_emis))
 
 #Extract linear models details from the homogenate control linear model
-quench_lm_details <- nest_emis_details %>% 
+quench_lm_details <- nest_emis_stats %>% 
   mutate(intcpt_quench = map_dbl(quench_lm, b_fun), slope_quench = map_dbl(quench_lm, slope_fun), r_squared_quench = map_dbl(quench_lm, r_sq_fun), max_fluor_quench = map_dbl(quench_data, max_fluor_fun))
 
 #nest the linear model details in a dataframe
@@ -256,7 +256,7 @@ plot_homog_fun <- function(quench_data, lm_stats_quench, plate){
 homog_plots <- plot_test %>% 
   mutate(plot_homog_control = pmap(list(quench_data, lm_stats_quench, plate), plot_homog_fun))
 
-homog_plots$lm_stats_emis
+homog_plots$plot_homog_control
 
 ```
 
@@ -289,66 +289,76 @@ emis_calc
 
 ```
 
-
-### Calculate extinction coefficient
-
-The emission coefficient is the slope (m) from the emission standard curves you made above, divided by the assay volume 
-
-Pay attention to units! 
-**slope (m) units** from the standard curves = fluor/uM = fluor/ (umol/L) = fluor L / umol = fluor mL / nmol
-
-**assay volume** is 250uL = 0.00025 L = 0.250 mL 
-
-The protocol states: "Make sure this is calculated with the MUB concentrations in nmol/mL, which is equivalent to umol/L."" 
-
-```{r, extintion-coefficient}
-assay_vol_ml <- 0.250
-
-# emission coefficient units are fluorescence / nmol
-calc_emission <-  emission_only %>% 
-  mutate(ext_coeff_fluor_per_nmol = m_slope/assay_vol_ml) %>% 
-  select(plate, max_fluor, ext_coeff_fluor_per_nmol, intcpt)
-
-calc_emission
-```
-
-
 ### Calculate the quench coefficient 
+
+The quench coefficient is calculated as the slope of the quench standard curve divided by the slope of the buffer control (emission) standard curve.  
+
+**Add more information about what the quench coefficient actually is...** 
+
 ```{r, quench-coefficient}
-quench_coeff <- stds_coeffs %>% 
-  pivot_wider(id_cols = plate, names_from = id, names_prefix = "slope_", values_from = m_slope) %>% 
-  mutate(quench_coeff_no_unit = slope_quench/slope_emission)
 
-quench_coeff
 
-all_calcs <- cbind(quench_coeff, calc_emission) %>% 
-  select(-id, -plate1)
+quench_coeff <- emis_calc %>% 
+  mutate(quench_coeff = map2_dbl(lm_stats_emis, lm_stats_quench, ~ as.numeric(.x[["slope_emis"]])/as.numeric(.y[["slope_quench"]])))
 
-all_calcs
+  
 ```
 
 
 
-### Add extinction & quench data to sample dataset 
+### Calculate means for assay and substrate control wells 
 
 ```{r}
+# to get the assay fluorescence, need to average the assay wells for each enzyme at the different substrate concentrations  (group by id, conc_uM) and then substract the homogenate blank (mub_soil_blank)
 
-clean_with_calcs <- left_join(clean_data, all_calcs, by = "plate")
+assay_fluor_fun <- function(data, mub_soil_blank){
+  data %>% 
+  filter(str_detect(id, "Assay")) %>% 
+  group_by(id, conc_uM) %>% 
+  summarise(fluor_assay_mean = mean(fluor)-mub_soil_blank, n = n(), sd = sd(fluor, na.rm = T), cv = sd(fluor, na.rm = T)/mean(fluor)*100)
+}
 
-clean_with_calcs
+assay_fluor_calc <- quench_coeff %>% 
+  mutate(assay_fluor_data = map2(data, mub_soil_blank, assay_fluor_fun))
 
-#can use an ifelse statement to restore the mub concentrations to the clean_data tbl? Maybe first do the mean calcs for each assay and substrate blank row, then restore the mub conentrations to the table
+assay_fluor_calc$assay_fluor_data
 
-# nest by template and average by conc_uM
+# substrate controls need to be averaged across the different concentrations, and subtract the plate blank 
 
-clean_with_calcs %>% 
-  group_by(plate) %>% 
-  nest()
+subs_control_fun <- function(data, plate_blank){
+  data %>%
+    filter(str_detect(id, "Blank")) %>% 
+    group_by(id, conc_uM) %>% 
+    summarise(fluor_sub_control_mean = mean(fluor) - plate_blank, n = n(), sd = sd(fluor, na.rm = T), cv = sd(fluor, na.rm = T)/mean(fluor)*100)
+}
 
+sub_control_calc <- assay_fluor_calc %>% 
+  mutate(sub_control_data = map2(data, plate_blank, subs_control_fun))
+
+sub_control_calc$assay_fluor_data
 ```
+##Calculate net fluorescence 
 
+Net fluorescence = ((assay-homogenate control) / quench coefficient) - (substrate control-plate blank)
+
+(assay fluor - homogenate control fluor) = fluor_assay_mean *(calculated above*)
+
+(substrate control - plate blank) = fluor_sub_control_mean *(calculated above)*
 
 ```{r}
+#Note that the fluorescence of the homogenate control was subtracted from the assay fluorescence in the chunk above so our formula becomes (fluor_assay_mean / quench coefficient) - substrate control
+
+
+
+test_net_fluor <- sub_control_calc %>% 
+  mutate(net_fluor = pmap(list(assay_fluor_data, quench_coeff, sub_control_data), ~(..1[["fluor_assay_mean"]]/..2) - ..3[["fluor_sub_control_mean"]]))
+
+test_net_fluor$net_fluor
+
+net_fluor_fun <- function(assay_fluor_data, quench_coeff, sub_control_data){ 
+  
+  }
+
 
 ```
 
