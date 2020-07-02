@@ -1,0 +1,9 @@
+﻿plate_id,sample_id,ph_buffer,moist_soil_mass_g,soil_water_content,vol_buffer_slurry_ml,substrates,time_soil_added,time_naoh_added,time_plate_read
+1_CB_ST2_7,ST2_CV_B,7,1.0052,0.31,25,C-B,12:05,13:05,13:06
+2_CB_ST2_5.6,ST2_CV_B,5.6,1.0049,0.31,25,C-B,12:09,13:09,13:10
+3_NP_ST2_7_A,ST2_CV_B,7,1.0052,0.31,25,N-P,12:07,13:08,13:09
+4_NP_ST2_5.6,ST2_CV_B,5.6,1.0049,0.31,25,N-P,12:10,13:11,13:12
+5_CB_RRV3_7,RRV3_SH_B,7,1.0035,0.35,25,C-B,12:12,13:15,13:16
+6_NP_RRV3_7,RRV3_SH_B,7,1.0035,0.35,25,N-P,12:13,13:17,13:18
+7_CB_RRV3_7.5,RRV3_SH_B,7.5,1.0054,0.35,25,C-B,12:15,13:18,13:19
+8_NP_RRV3_7.5,RRV3_SH_B,7.5,1.0054,0.35,25,N-P,12:16,13:19,13:21
