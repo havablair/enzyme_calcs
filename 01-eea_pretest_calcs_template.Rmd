@@ -1,0 +1,423 @@
+---
+title: "Hydrolytic Extracellular Enzyme Pre-test Calculations"
+author: "Hava Blair"
+date: "June 18, 2020"
+output: html_document
+params: 
+  round: 3
+  lab_date: 20200707
+---
+## Enzyme Pre-test Calculations 
+
+```{r, packages, echo = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr:: opts_chunk$set(tidy = TRUE)
+knitr:: opts_chunk$set(tidy.opts = list(width.cutoff=55))
+
+## Load Packages 
+library(tidyverse)
+library(plater)
+library(glue)
+library(broom)
+library(hms)
+library(ggrepel)
+
+```
+
+## Read in plate templates
+
+You need one completed template file for each plate, in CSV format. See https://github.com/havablair/plater-prep 
+
+  
+## File organization 
+
+Place template files for each round in their own subfolder named "plater-templates-round#", filling in # with the appropriate numeral.
+
+Now you are ready to read in your files. If you get an error, check whether you have any extra CSV files in the designated folder.
+
+## Read in plate templates & metadata 
+
+```{r files}
+file.names <- dir(glue("./data/temp/plater-templates-round{params$round}/"))
+file.paths<- paste0(glue("./data/temp/plater-templates-round{params$round}/"), file.names)
+plates <- read_plates(file.paths)
+colnames(plates) <- c("plate", "wells", "id", "bad_wells", "conc_uM", "fluor")
+
+plates
+
+# To check that all plates read in correctly
+head(plates)
+unique(plates$plate) 
+
+#read in plate metadata
+plate_metadata <- read.csv(glue("./data/metadata/eea_plate_metadata_pretest{params$round}.csv"), stringsAsFactors = FALSE)
+
+colnames(plate_metadata) <- c("plate", "sample_id", "ph_buffer", "moist_soil_mass_g", "soil_water_content", "vol_buffer_ml", "substrates", "time_soil_added", "time_naoh_added", "time_plate_read")
+
+head(plate_metadata)
+```
+
+# Metadata calculations
+
+## Incubation time, soil oven dry equivalent
+```{r}
+
+# parse the time columns so we can do math on them
+plate_metadata <- plate_metadata %>% 
+  mutate(time_soil_added = parse_hm(time_soil_added), 
+         time_naoh_added = parse_hm(time_naoh_added), 
+         time_plate_read = parse_hm(time_plate_read))
+
+# calculate incubation time and convert from seconds to hours
+plate_metadata <- plate_metadata %>% 
+  mutate(inc_time_hr = as.numeric(((time_plate_read - time_soil_added)/60/60)))
+
+
+#calculate soil oven dry equivalent 
+
+plate_metadata <- plate_metadata %>% 
+  mutate(soil_ov_dry_eq_g = moist_soil_mass_g - (moist_soil_mass_g * soil_water_content))
+
+plate_metadata
+
+```
+
+# Initial Quality Control 
+
+## Remove empty wells and known bad wells
+
+
+```{r badwells}
+#Remove empty wells
+no_missing <- subset(plates, !is.na(id) & id != 0 & id != ".")
+
+# Remove bad wells and keep good ones
+no_bad <- subset(no_missing, is.na(bad_wells))
+
+no_missing$bad_wells
+
+#Create a dataframe with the details about which wells were removed as "bad".  Can write this to CSV now, or wait until after later QC checks to compile a list of samples that need to be redone.
+bad_list <- subset(no_missing, !is.na(bad_wells))
+
+wells_removed <- nrow(plates) - nrow(no_bad)
+
+glue("Removed {wells_removed} wells that were missing or bad")
+
+clean_data <- no_bad
+
+clean_nested <- clean_data %>% 
+  group_by(plate) %>% 
+  nest()
+
+head(clean_nested)
+
+```
+
+# Calculate plate blank and homogenate blank (hombl)
+
+```{r}
+# function to calculate plate blank mean fluor
+get_plate_blank <- function(data){
+  buf <- data %>% 
+    filter(id == "Buf")
+    mean(buf$fluor)
+}
+
+# apply function to nested dataframe
+plate_blanks <- clean_nested %>% 
+  mutate(plate_blank = map_dbl(data, get_plate_blank))
+
+# function to calculate homogenate blank (Buf +s) mean fluor 
+get_hombl <- function(data){
+  buf_soil <- data %>% 
+    filter(id == "Buf+s")
+    mean(buf_soil$fluor)
+}
+
+# apply function to nested dataframe
+hombl_calcs <- plate_blanks %>% 
+  mutate(hombl = map_dbl(data, get_hombl))
+
+hombl_calcs$data
+
+```
+
+
+## MUB Standard calculations (for emission coeff calc)
+
+Calculate the mean fluorescence for each concentration of MUB standard (no soil).  Subtract the plate blank to calculate the corrected fluorescence value for the MUB standards. 
+
+```{r}
+mub_std_fun <- function(data){
+  data %>%
+    select(wells, id, fluor, conc_uM) %>% 
+    filter(str_detect(wells, "10")) %>% 
+    group_by(id) %>% 
+    summarise(mub_std_mean = mean(fluor), n = n()) #Add CV here?
+}
+
+mub_stds <- hombl_calcs %>% 
+  mutate(mub_std_values = map(data, mub_std_fun))
+
+#Can always include an "unnest" option here for quick viewing of the plate numbers and standards
+
+
+#Subtract the plate blank from the fluorescence values for each averaged concentration
+
+corr_stds <- mub_stds %>% 
+  unnest(mub_std_values) %>% 
+  mutate(corr_fluor = mub_std_mean - plate_blank, conc_uM = as.numeric(str_replace(id, "MUB", ""))) %>% 
+  nest(std_data = c(id, mub_std_mean, n, corr_fluor, conc_uM))
+
+```
+
+## MUB + Soil Standards 
+
+Calculate the mean fluorescence of MUB + soil at each MUB concentration and correct the fluor using the homogenate blank values.
+
+```{r}
+
+#Average the MUB+soil wells  to get mean fluorescence for each concentration and calculate corrected value by subtracting the fluor of the homogenate blank.
+quench_std_fun <- function(data, hombl){
+  data %>%
+    select(wells, id, fluor, conc_uM) %>% 
+    filter(str_detect(wells, "09")) %>% 
+    mutate(conc_uM = as.numeric(str_replace(conc_uM, "mub_", ""))) %>%
+    group_by(conc_uM) %>% 
+    summarise(quench_fluor = mean(fluor), n = n(), sd = sd(fluor), cv = (sd(fluor)/mean(fluor))*100, corr_fluor = quench_fluor - hombl) 
+}
+
+quench_stds <- corr_stds %>% 
+  mutate(quench_std_values = map2(data, hombl, quench_std_fun))
+
+```
+# Linear models 
+
+##Linear model functions 
+
+```{r lm-fun}
+
+#function to run a linear model x = MUB concentration, y = mean fluorescence
+
+lm_mod_ftn <- function(df){
+  lm(corr_fluor ~ conc_uM, data = df)
+}
+
+# functions to extract linear model details calculated above into a nicer format for putting in our graphs
+
+b_fun <- function(mod){
+  coefficients(mod)[[1]]
+}
+
+slope_fun <- function(mod){
+  coefficients(mod)[[2]]
+}
+
+r_sq_fun <- function(mod){
+  summary(mod)[["r.squared"]]
+}
+
+ max_fluor_fun <- function(data){
+   max(data$corr_fluor)
+ }
+
+```
+
+
+## Linear model calculations 
+
+```{r lm-calcs}
+
+#calculate linear model for both standard curves (MUB standards (emission) and MUB stds +soil (quench))
+lm_calcs <- quench_stds %>% 
+  mutate(emis_lm = map(std_data, lm_mod_ftn), quench_lm = map(quench_std_values, lm_mod_ftn))
+
+#Extract linear model details from the MUB standard (emission) linear model
+emis_lm_details <- lm_calcs %>% 
+  mutate(intcpt_emis = map_dbl(emis_lm, b_fun), slope_emis = map_dbl(emis_lm, slope_fun), r_squared_emis = map_dbl(emis_lm, r_sq_fun), max_fluor_emis = map_dbl(std_data, max_fluor_fun))
+
+#nest the linear model details in a dataframe
+nest_emis_stats <- emis_lm_details %>% 
+  nest(lm_stats_emis = c(intcpt_emis, slope_emis, r_squared_emis, max_fluor_emis))
+
+#Extract linear models details from the MUB std + soil (quench) linear model
+quench_lm_details <- nest_emis_stats %>% 
+  mutate(intcpt_quench = map_dbl(quench_lm, b_fun), slope_quench = map_dbl(quench_lm, slope_fun), r_squared_quench = map_dbl(quench_lm, r_sq_fun), max_fluor_quench = map_dbl(quench_std_values, max_fluor_fun))
+
+#nest the linear model details in a dataframe
+nest_quench_stats <- quench_lm_details %>% 
+  nest(lm_stats_quench = c(intcpt_quench, slope_quench, r_squared_quench, max_fluor_quench))
+
+```
+
+
+## Plot MUB Standard Curve (emission) 
+
+```{r std-curve, fig.height = 4, fig.width=5}
+#Function to make standard curve plots
+
+plot_pts_fun <- function(std_data, lm_stats_emis, plate){
+  g <- ggplot() + 
+  geom_point(data = std_data, aes(x = conc_uM, y = corr_fluor)) + 
+    geom_abline(data = lm_stats_emis, aes(slope = slope_emis, intercept = intcpt_emis)) +
+    geom_text(data = lm_stats_emis, aes(x = 1.0, y = 8000, label = paste("R^2=", round(r_squared_emis, digits = 4))), inherit.aes = FALSE) +
+    geom_text(data = lm_stats_emis, aes(x = 1.0, y = 10000, label = paste(" y= ", round(slope_emis, digits = 2), "x", " + ", round(intcpt_emis, digits = 2))), inherit.aes = FALSE) + 
+    labs(title = glue("{plate} buffer control standard curve"))
+  return(g)
+}
+
+
+plot_test <- nest_quench_stats %>% 
+  mutate(plot_buffer_control = pmap(list(std_data, lm_stats_emis, plate), plot_pts_fun))
+
+plot_test$plot_buffer_control
+
+
+```
+
+## Plot MUB standard + soil standard curve (quench)
+
+```{r soil-std-curve}
+plot_homog_fun <- function(quench_std_values, lm_stats_quench, plate){
+  g <- ggplot() + 
+  geom_point(data = quench_std_values, aes(x = conc_uM, y = corr_fluor)) + 
+    geom_abline(data = lm_stats_quench, aes(slope = slope_quench, intercept = intcpt_quench)) +
+    geom_text(data = lm_stats_quench, aes(x = 1.0, y = (max_fluor_quench), label = paste("R^2=", round(r_squared_quench, digits = 3))), inherit.aes = FALSE) +
+    geom_text(data = lm_stats_quench, aes(x = 1.0, y = (max_fluor_quench - 500), label = paste(" y= ", round(slope_quench, digits = 2), "x", " + ", round(intcpt_quench, digits = 2))), inherit.aes = FALSE) + 
+    labs(title = glue("{plate} homogenate control standard curve"))
+  return(g)
+}
+
+homog_plots <- plot_test %>% 
+  mutate(plot_homog_control = pmap(list(quench_std_values, lm_stats_quench, plate), plot_homog_fun))
+
+homog_plots$plot_homog_control
+
+```
+
+# Coefficient calculations 
+
+## Calculate emission coefficient
+
+The emission coefficient is the slope (m) from plate b (fluorescence vs MUB conc NO SOIL) divided by the standard well volume - see German et al. 2011 corrigendum. 
+
+German, D. P., Weintraub, M. N., Grandy, A. S., Lauber, C. L., Rinkes, Z. L., & Allison, S. D. (2012). Corrigendum to “Optimization of hydrolytic and oxidative enzyme methods for ecosystem studies” [Soil Biol. Biochem. 43 (2011) 1387–1397]. Soil Biology and Biochemistry, 44(1), 151. https://doi.org/https://doi.org/10.1016/j.soilbio.2011.11.002
+
+
+Pay attention to units! 
+**slope (m) units** from the standard curves = fluor/uM = fluor/ (umol/L) = fluor L / umol = fluor mL / nmol
+
+**assay volume units** are 250uL = 0.00025 L = 0.250 mL 
+
+**emission coefficient** units are fluorescence/nmol. 
+
+```{r, emission-coefficient}
+
+# emission coefficient units are fluorescence / nmol
+stdwell_vol_ml <- 0.250
+
+emis_calc <- homog_plots %>% 
+  mutate(emis_coeff = map_dbl(lm_stats_emis, ~ as.numeric(.x[["slope_emis"]])/stdwell_vol_ml))
+
+```
+
+### Calculate the quench coefficient 
+
+The quench coefficient is calculated as the slope of the quench standard curve divided by the slope of the buffer control (emission) standard curve.
+
+**Add more information about what the quench coefficient actually is...** 
+
+```{r quench-coefficient}
+
+quench_coeff <- emis_calc %>% 
+  mutate(quench_coeff = map2_dbl(lm_stats_quench, lm_stats_emis, ~ as.numeric(.x[["slope_quench"]])/as.numeric(.y[["slope_emis"]])))
+
+```
+
+
+
+## Calculate means for assay wells
+
+```{r}
+#select data: plate blank, homogenate blank (hombl), emission coefficient, and quench coefficient
+plate_data <- quench_coeff %>% 
+  select(plate, plate_blank, hombl, emis_coeff, quench_coeff)
+
+plate_data_df <- as.data.frame(plate_data)
+
+#Calculate the mean fluorescence for the assay wells and substrate control wells
+mean_fluor_calcs <- clean_data %>% 
+  filter(str_detect(id, "Assay") | str_detect(id, "blank")) %>% 
+  group_by(plate, id, conc_uM) %>% 
+  summarise(fluor_mean = mean(fluor), n = n(), sd = sd(fluor, na.rm = T), cv = sd(fluor, na.rm = T)/mean(fluor)*100)
+
+#QC check - plot dist of each sample and enzyme to see what's normal?
+
+# format dataframe "wide" so that substrate controls are in columns adjacent to assay wells for each enzyme
+
+wide <- mean_fluor_calcs %>% 
+  pivot_wider(id_cols = c(plate, id, conc_uM), names_from = id, values_from = fluor_mean, names_prefix = "mean_fluor_", names_sep = "_")
+
+# join coeffs to assay/substrate well calculations 
+wide_coeffs <- left_join(wide, plate_data_df, by = "plate")
+
+``` 
+
+##Calculate net fluorescence 
+
+Net fluorescence = ((assay-homogenate control) / quench coefficient) - (substrate control-plate blank)
+
+```{r, net-fluor-calc}
+
+net_fluor_calcs <- wide_coeffs %>% 
+  mutate(BG_net_fluor = (((`mean_fluor_B-Assay` - hombl)/quench_coeff)-(`mean_fluor_B-sub-blank` - plate_blank)), 
+         Cello_net_fluor = (((`mean_fluor_C-Assay` - hombl)/quench_coeff)-(`mean_fluor_C-sub-blank` - plate_blank)),  
+         NAG_net_fluor = (((`mean_fluor_N-Assay` - hombl)/quench_coeff)-(`mean_fluor_N-sub-blank` - plate_blank)),
+         P_net_fluor = (((`mean_fluor_P-Assay` - hombl)/quench_coeff)-(`mean_fluor_P-sub-blank` - plate_blank)))
+
+```
+
+
+##Calculate activity 
+
+Activity(nmol/g^-1 h^-1) = [Net fluor x buffer vol (mL)] / [emis coeff x homogenate vol(mL) x time(h) x soil mass(g)]
+
+Activity units are nmol / g^-1 hr^-1
+
+```{r, activity-calc}
+
+#buffer vol is the volume of buffer used to make the soil slurries. In the pre-test, this is 25mL.  In the regular protocol, it is 50mL
+buffer_vol_ml <- 25
+
+#vol of homogenate added to the assay wells
+homogenate_vol_ml <- 0.200 
+
+#bring in plate metadata
+add_metadata <- left_join(net_fluor_calcs, plate_metadata, by = "plate")
+
+activity_calcs <- add_metadata %>% 
+  mutate(BG_activity = (BG_net_fluor * buffer_vol_ml) / (emis_coeff * homogenate_vol_ml * inc_time_hr * soil_ov_dry_eq_g), 
+         Cello_activity = (Cello_net_fluor * buffer_vol_ml) / (emis_coeff * homogenate_vol_ml * inc_time_hr * soil_ov_dry_eq_g),
+         NAG_activity = (NAG_net_fluor * buffer_vol_ml) / (emis_coeff * homogenate_vol_ml * inc_time_hr * soil_ov_dry_eq_g), 
+          P_activity = (P_net_fluor * buffer_vol_ml) / (emis_coeff * homogenate_vol_ml * inc_time_hr * soil_ov_dry_eq_g))
+
+activity_long <- activity_calcs %>% 
+  select(plate, conc_uM, BG_activity, Cello_activity, NAG_activity, P_activity, ph_buffer, sample_id) %>% 
+  pivot_longer(cols = c(BG_activity, Cello_activity, NAG_activity, P_activity), names_to = "enzyme", values_to = "activity") %>% 
+  mutate(enzyme = str_replace(enzyme, "_activity", ""))
+
+
+#get rid of rows with activity = NA (produced because each plate only measures 2 of 4 enzymes, but the formula above runs the calculation regardless)
+activity_long <- activity_long %>% 
+  filter(!is.na(activity)) %>% 
+  mutate(conc_uM = as.numeric(str_replace(conc_uM, "sub_", "")))
+
+activity_long %>% 
+  filter(activity < 0 )
+
+# 1 activity is negative (<0).  It is on plate 3_NP_ST2_7, conc = 4.8uM, N enzyme, activity = -0.265.  Consider flagging and setting to 0? 
+
+write.csv(activity_long, glue("./results/calcs/pretest_eea_{params$round}_{params$lab_date}_calcs.csv"), row.names = F)
+
+```
+
