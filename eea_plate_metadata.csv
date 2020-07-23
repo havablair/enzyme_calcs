@@ -1,5 +1,0 @@
-﻿plate_id,sample_id,ph_buffer,moist_soil_mass_g,soil_water_content,vol_buffer_ml,substrates,time_soil_added,time_naoh_added,time_plate_read
-1B_ST2_7,ST2-CV-B,7,1.0077,0.31,200,B,12:40,13:40,13:41
-3B_ST2_7,ST2-CV-B,7,1.0077,0.31,200,B,12:44,13:43,13:44
-5B_ST2_5.6,ST2-CV-B,5.6,1.0016,0.31,200,B,12:47,13:48,13:49
-7B_ST2_5.6,ST2-CV-B,5.6,1.0016,0.31,200,B,12:49,13:50,13:52

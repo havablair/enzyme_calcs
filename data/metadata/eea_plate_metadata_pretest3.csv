@@ -1,0 +1,9 @@
+﻿plate_id,sample_id,ph_buffer,moist_soil_mass_g,soil_water_content,vol_buffer_slurry_ml,substrates,time_soil_added,time_naoh_added,time_plate_read
+1-rr120-8-bc,RR2_SH_A_3,8,1.0082,0.32,25,B-C,12:21,13:21,13:23
+2-rr120-8-np,RR2_SH_A_3,8,1.0082,0.32,25,N-P,12:23,13:24,13:25
+3-rr120-7-bc,RR2_SH_A_3,7,1.0002,0.32,25,B-C,12:05,13:07,13:10
+4-rr120-7-np,RR2_SH_A_3,7,1.0002,0.32,25,N-P,12:09,13:08,13:10
+5-sw61-6.5-bc,SW1_SH_A_3,6.5,1.0056,0.32,25,B-C,12:18,13:20,13:21
+6-sw61-6.5-np,SW1_SH_A_3,6.5,1.0056,0.32,25,N-P,12:16,13:18,13:19
+7-sw61-7-bc,SW1_SH_A_3,7,1.0023,0.32,25,B-C,12:12,13:13,13:14
+8-sw61-7-np,SW1_SH_A_3,7,1.0023,0.32,25,N-P,12:14,13:15,13:16

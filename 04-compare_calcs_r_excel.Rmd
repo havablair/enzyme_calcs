@@ -1,0 +1,74 @@
+---
+title: "Compare Excel & R EEA Calculations"
+author: "Hava Blair"
+date: "July 23, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## About 
+
+The purpose of this document is to compare the results of enzyme calculations performed with `eea_pretest_calcs.Rmd` and the results produced by the Excel document historically used in the Gutknecht lab.  
+
+## Compare with "final calcs" tab in Excel spreadsheet template 
+
+```{r data}
+from_template2 <- read.csv("./data/raw/eea_excel_test2.csv", stringsAsFactors = FALSE)
+
+colnames(from_template2) <- c("enzyme", "plate", "conc_uM", "activity", "ph_buffer", "sample_id")
+
+activity_long$batch = "r_script"
+from_template2$batch = "excel_sheet2"
+
+activity_long <- as.data.frame(activity_long)
+
+activity_long$conc_uM <- as.numeric(str_replace(activity_long$conc_uM, "sub_", ""))
+
+test_merged <- rbind(activity_long, from_template2)
+
+diff_tbl <- test_merged %>% 
+  pivot_wider(id_cols = c(plate, conc_uM, ph_buffer, sample_id, enzyme), names_from = batch, values_from = activity) %>% 
+  mutate(diff = excel_sheet2 - r_script)
+```
+
+
+## Comparison graphs 
+
+Results appear to differ by a constant (small).  
+
+```{r graphs}
+
+diff_tbl %>% 
+  filter(enzyme == "BG") %>% 
+  ggplot(aes(x = conc_uM, y = diff, label = round(diff, 3))) +
+  geom_point() + 
+  geom_text_repel() +
+  facet_wrap(vars(plate, enzyme), ncol = 2)
+
+
+diff_tbl %>% 
+  filter(enzyme == "Cello") %>% 
+  ggplot(aes(x = conc_uM, y = diff, label = round(diff, 3))) +
+  geom_point() + 
+  geom_text_repel() +
+  facet_wrap(vars(plate, enzyme), ncol = 2)
+
+diff_tbl %>% 
+  filter(enzyme == "NAG") %>% 
+  ggplot(aes(x = conc_uM, y = diff, label = round(diff, 3))) +
+  geom_point() + 
+  geom_text_repel() +
+  facet_wrap(vars(plate, enzyme), ncol = 2)
+
+diff_tbl %>% 
+  filter(enzyme == "P") %>% 
+  ggplot(aes(x = conc_uM, y = diff, label = round(diff, 3))) +
+  geom_point() + 
+  geom_text_repel() +
+  facet_wrap(vars(plate, enzyme), ncol = 2)
+
+```
+

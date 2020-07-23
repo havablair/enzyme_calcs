@@ -1,0 +1,139 @@
+---
+title: 'Pretest Results: CIG Hydrolytic Extracelleular Enzyme Assays'
+author: "Hava Blair"
+date: "July 1, 2020"
+output:
+  pdf_document:
+    df_print: kable
+  html_document: default  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(tidyverse)
+library(glue)
+library(ggrepel)
+```
+
+# About the pre-test 2 samples
+
+SW1_SH_A_3 = MN River Valley, pH 6.5  
+RRV2_SH_A_3 = Red River Valley, pH 8  
+
+I performed the pre-test on these samples using buffers at the soil pH for that sample (6.5 or 8).  I also tested both samples with a neutral (7) buffer.  
+
+# Pre-test data 
+
+Pre-test data was processed with the R-Markdown document "eea_pretest_calcs.Rmd"
+```{r data,}
+pre_data <- read.csv("./results/calcs/pretest_eea_3_20200707_calcs.csv", stringsAsFactors = FALSE)
+
+# set ph_buffer col as factor 
+pre_data$ph_buffer <- as.factor(pre_data$ph_buffer)
+
+head(pre_data)
+```
+\newpage
+
+# Phosphatase
+
+```{r}
+
+# P Enzyme 
+
+pre_data %>% 
+  filter(enzyme == "P") %>% 
+  ggplot() +
+  geom_point(aes(x = conc_uM, y = activity, color = ph_buffer)) + 
+  theme(legend.position = "bottom") + 
+  labs(title = "Phosphatase activity as a function of substrate concentration & buffer pH") + 
+    facet_wrap(vars(sample_id))
+``` 
+
+## Red River Valley
+At pH 7, we appear to have saturating substrate concentrations starting around ~ 75 uM, similar to pre-test 1. At substrate concentrations of 300uM, activity for pH 8 is ~90, while at pH 7 it is ~40 (~45% difference)
+
+## MN River Valley
+Activities are similar for both pH 6.5 and pH 7.  Appear to reach saturation at >210uM substrate concentration. 
+
+\newpage
+# N-acetylglucosaminidase (NAGase)
+```{r}
+# NAG Enzyme 
+
+pre_data %>% 
+  filter(enzyme == "NAG") %>% 
+  ggplot() +
+  geom_point(aes(x = conc_uM, y = activity, color = ph_buffer)) + 
+  theme(legend.position = "bottom") + 
+  labs(title = "N-acetylglucosaminidase (NAGase) activity as a function of substrate concentration & buffer pH") + 
+    facet_wrap(vars(sample_id))
+
+``` 
+
+## Red River Valley 
+
+Substantially lower activity in the RR sample compared to the SW sample.  But activities at pH 7 vs pH 8 for this sample are pretty similar
+
+## MN River Valley
+
+Activities at pH 6.5 is substantially higher at substrate concentrations 150uM and 210uM.  However at 300uM activites are simlar for pH 6.5 and 7. 
+
+\newpage
+# Cellobiohydrolase
+
+```{r}
+# Cello Enzyme 
+
+pre_data %>% 
+  filter(enzyme == "Cello") %>% 
+  ggplot() +
+  geom_point(aes(x = conc_uM, y = activity, color = ph_buffer)) + 
+  theme(legend.position = "bottom") + 
+  labs(title = "Cellobiohydrolase activity as a function of substrate concentration & buffer pH") + 
+    facet_wrap(vars(sample_id))
+``` 
+
+## Red River Valley 
+
+Somewhat perplexing curve shape here - looks like activities peek around 75-100uM and then decline >150uM for both pHs?   
+
+## MN River Valley 
+
+Activity consistently higher at pH 6.5 compared to pH 7 except at the lowest substrate concentrations.  At 300uM, our typical "saturating" condition for these assays, activity at pH 6.5 is ~13, while at pH 7 it is  ~7.
+
+
+\newpage
+# B-glucosidase 
+```{r}
+# BG Enzyme 
+
+pre_data %>% 
+  filter(enzyme == "BG") %>% 
+  ggplot() +
+  geom_point(aes(x = conc_uM, y = activity, color = ph_buffer)) + 
+  theme(legend.position = "bottom") + 
+  labs(title = "B-glucosidase activity as a function of substrate concentration & buffer pH") + 
+    facet_wrap(vars(sample_id))
+
+
+  
+```
+
+## Red River Valley 
+Activities consistently higher at pH 7 than at pH 8.  At 300uM activity at pH 7 is ~75, while at pH 8 it is 45.  
+
+## SW (MN River Valley) 
+Activity consistently higher at pH 6.5 than at pH 7.  
+
+At pH 7, we appear to reach saturating substrate concentrations at >150uM.  
+
+# Overall 
+For NAG, the change in buffer pH does not appear to have a big impact on actvity measured at substrate concentrations of 300uM for either RR or SW samples.  
+
+Phosphatase activities for sample RR2 are 45% higher at pH 8 compared to pH 7.  In contrast, for sample SW1 not much difference between pH 6.5 and pH 7. 
+
+BG activity - pH makes a big difference (50%+) in activity for both samples 
+
+Cello activity - at substrate concentrations of 300uM, not much difference in activity for the RR2 sample between pH 7 and 8, but the curve shape overall looks a bit weird. For the SW sample, activity is ~50% at pH 6.5.  

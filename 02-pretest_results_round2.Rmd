@@ -1,0 +1,139 @@
+---
+title: 'Pretest Results: CIG Hydrolytic Extracelleular Enzyme Assays'
+author: "Hava Blair"
+date: "July 1, 2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(tidyverse)
+library(glue)
+library(ggrepel)
+```
+
+# About the pre-test samples
+
+I selected 2 samples from the CIG 2019 set that represent both ends of the pH range we are working with: 
+
+ST2_CV_B = Stearns County, pH 5.6  
+RRV3_SH_B = Red River Valley, pH 7.5  
+
+I performed the pre-test on these samples using buffers at the soil pH for that sample (5.6 or 7.5).  I also tested both samples with a neutral (7) buffer.  
+
+# Pre-test data 
+
+Pre-test data was processed with the R-Markdown document "eea_pretest_calcs.Rmd"
+```{r data,}
+pre_data <- read.csv("./results/calcs/pretest_eea_2_20200706_calcs.csv", stringsAsFactors = FALSE)
+
+# set ph_buffer col as factor 
+pre_data$ph_buffer <- as.factor(pre_data$ph_buffer)
+
+head(pre_data)
+```
+\newpage
+
+# Phosphatase
+
+```{r}
+
+# P Enzyme 
+
+pre_data %>% 
+  filter(enzyme == "P") %>% 
+  ggplot() +
+  geom_point(aes(x = conc_uM, y = activity, color = ph_buffer)) + 
+  theme(legend.position = "bottom") + 
+  labs(title = "Phosphatase activity as a function of substrate concentration & buffer pH") + 
+    facet_wrap(vars(sample_id))
+``` 
+
+## Red River Valley
+Need to re-run the RRV comparison because the standard curve for my pH 7.5 batch for P and NAG was bad.  
+
+At pH 7, we appear to have saturating substrate concentrations starting around ~ 75 uM.  
+
+## Stearns
+Suspect contamination at 300 uM for pH 5.6.  Beyond 75 uM, potential activities are higher at pH 7 than at pH 5.6.  At pH 7, appear to have saturating substrate concentrations around 210 uM.  
+
+\newpage
+# N-acetylglucosaminidase (NAGase)
+```{r}
+# NAG Enzyme 
+
+pre_data %>% 
+  filter(enzyme == "NAG") %>% 
+  ggplot() +
+  geom_point(aes(x = conc_uM, y = activity, color = ph_buffer)) + 
+  theme(legend.position = "bottom") + 
+  labs(title = "N-acetylglucosaminidase (NAGase) activity as a function of substrate concentration & buffer pH") + 
+    facet_wrap(vars(sample_id))
+``` 
+
+## Red River Valley 
+
+Need to re-run the RRV comparison because the standard curve for my pH 7.5 batch for P and NAG was bad. The pH 7 curve shows here doesn't look great either, it's not clear from the raw data that 150uM has contamination, but on the graph it looks like a pipetting error
+
+## Stearns 
+
+It's not clear that we reached saturating substrate concentrations at pH 7 or at pH 5.6 here.  Need to redo this comparison. 
+
+\newpage
+# Cellobiohydrolase
+
+```{r}
+# Cello Enzyme 
+
+pre_data %>% 
+  filter(enzyme == "Cello") %>% 
+  ggplot() +
+  geom_point(aes(x = conc_uM, y = activity, color = ph_buffer)) + 
+  theme(legend.position = "bottom") + 
+  labs(title = "Cellobiohydrolase activity as a function of substrate concentration & buffer pH") + 
+    facet_wrap(vars(sample_id))
+``` 
+
+## Red River Valley 
+
+Not much difference in Cello potential activity between pH 7 and pH 7.5.  Appears that we reach saturating substrate concentrations at >75uM. 
+
+## Stearns 
+
+Something weird happening with the 210uM point at pH 5.6.  At pH 7, potential activity is much lower and we appear to reach saturating substrate concentrations at >75uM. Overall potential activity at pH 5.6 much higher than at pH 7.  
+
+
+\newpage
+# B-glucosidase 
+```{r}
+# BG Enzyme 
+
+pre_data %>% 
+  filter(enzyme == "BG") %>% 
+  ggplot() +
+  geom_point(aes(x = conc_uM, y = activity, color = ph_buffer)) + 
+  theme(legend.position = "bottom") + 
+  labs(title = "B-glucosidase activity as a function of substrate concentration & buffer pH") + 
+    facet_wrap(vars(sample_id))
+  
+```
+
+## Red River Valley 
+
+Not much difference in BG potential activity between pH 7 and pH 7.5.  Appears that we reach saturating substrate concentrations at >75uM. 
+
+## Stearns 
+
+At pH 7, we appear to reach saturating substrate concentrations at >210uM.  Not clear that we reached saturation at pH 5.6, 300uM point might be suspect. 
+
+# Overall 
+
+I am going to rerun these tests because some of the data is noisy (especially with the pH 5.6 buffer). 
+
+For the Stearns sample, BG, NAG, and Cello potential activity is much higher at pH 5.6 than at pH 7. In contrast, phosphatase potential activity appears to be higher at pH 7 than at pH 5.6. 
+
+For the Red River Valley sample, there is not much of a difference between BG and Cello activity at pH 7.5 vs pH 7.  I need to rerun the NAG and P enzymes at pH 7 and pH 7.5 due to a bad standard curve the first time around.  
+
